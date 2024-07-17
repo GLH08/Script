@@ -10,6 +10,8 @@ ampDache = type= http-response, pattern=^https:\/\/m5(-zb)?\.amap\.com\/ws\/yuec
 aDriveCheckIn = type=http-request, pattern=^https:\/\/(auth|aliyundrive)\.alipan\.com\/v2\/account\/token, script-path=https://gist.githubusercontent.com/Sliverkiss/33800a98dcd029ba09f8b6fc6f0f5162/raw/aliyun.js, requires-body=true, max-size=-1, timeout=60
 # >百度贴吧
 http-request ^https?:\/\/(c\.tieba\.baidu\.com|180\.97\.\d+\.\d+)\/c\/s\/login script-path=https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/script/tieba/tieba_signin.js
+# >B站
+BilibiliCookie(APP) = type=http-request,pattern=^https?:\/\/app\.bilibili\.com\/x\/resource\/fingerprint\?,script-path=https://raw.githubusercontent.com/ClydeTime/BiliBili/main/js/BiliBiliDailyBonus.js,requires-body=0
 
 [MITM]
-hostname = %APPEND% h5.if.qidian.com, *.amap.com,auth.alipan.com, auth.aliyundrive.com, tiebac.baidu.com, c.tieba.baidu.com, www.nodeseek.com
+hostname = %APPEND% h5.if.qidian.com, *.amap.com,auth.alipan.com, auth.aliyundrive.com, tiebac.baidu.com, c.tieba.baidu.com, www.nodeseek.com, app.bilibili.com, m.bilibili.com
