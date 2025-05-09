@@ -2,8 +2,7 @@
 #!desc=iOS Cookies 模块配置
 [Script]
 # >起点读书
-qidian.cookie = type=http-request, pattern=https\:\/\/h5\.if\.qidian\.com\/argus\/api\/v1\/video\/adv\/finishWatch, script-path=https://raw.githubusercontent.com/MCdasheng/QuantumultX/main/Scripts/myScripts/qidian/qidian.cookie.js, requires-body=true, max-size=-1, timeout=60
-qidian.taskId = type=http-response, pattern=https\:\/\/h5\.if\.qidian\.com\/argus\/api\/v1\/video\/adv\/mainPage, script-path=https://raw.githubusercontent.com/MCdasheng/QuantumultX/main/Scripts/myScripts/qidian/qidian.taskId.js, requires-body=true, max-size=-1, timeout=60
+QidianCookie = type=http-request, pattern=^https:\/\/h5\.if\.qidian\.com\/argus\/api\/v1\/video\/adv\/finishWatch, script-path=https://raw.githubusercontent.com/MCdasheng/QuantumultX/main/Scripts/myScripts/QiDian/qidian.cookie.js, requires-body=true, timeout=60
 # >高德地图
 ampDache = type= http-response, pattern=^https:\/\/m5(-zb)?\.amap\.com\/ws\/yuece\/(act|openapi)\/(activity\/current\/)?query, script-path=https://raw.githubusercontent.com/wf021325/qx/master/task/ampDache.js, requires-body=true, max-size=-1, timeout=60
 # >阿里云盘
