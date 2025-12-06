@@ -11,6 +11,11 @@
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH LANG=C.UTF-8
 
+# 定义 clear 函数（兼容没有 ncurses 的系统）
+if ! command -v clear &>/dev/null; then
+    clear() { printf '\033[2J\033[H'; }
+fi
+
 # 检查是否为 root
 if [[ $EUID -ne 0 ]]; then
     echo "请以 root 权限运行此脚本"
@@ -1517,7 +1522,7 @@ check_singbox() {
     if [[ -f "$SINGBOX_BIN" ]]; then
         local ver=$($SINGBOX_BIN version 2>/dev/null | head -1 | awk '{print $NF}')
         local status=$(service_status sing-box)
-        local count=$(ls "${SINGBOX_INBOUNDS_DIR}"/*.json 2>/dev/null | wc -l)
+        local count=$(find "${SINGBOX_INBOUNDS_DIR}" -name "*.json" ! -name "00_base.json" 2>/dev/null | wc -l)
         echo -e "Sing-box: ${GREEN}${ver:-未知}${NC} (${status}) - ${GREEN}${count}${NC} 个节点"
         return 0
     else
@@ -1561,34 +1566,50 @@ EOF
     log_success "Sing-box 核心安装完成"
 }
 
-# 重新生成 config.json（合并所有 inbound）
+# 重新生成 config.json（使用 sing-box merge 合并所有配置）
 rebuild_singbox_config() {
-    ensure_cmd jq jq
     mkdir -p "$SINGBOX_INBOUNDS_DIR"
     
-    # 收集所有 inbound 配置
-    local inbounds="[]"
-    for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
-        [[ -f "$f" ]] || continue
-        local inbound=$(cat "$f")
-        inbounds=$(echo "$inbounds" | jq --argjson new "$inbound" '. + [$new]')
-    done
-    
-    # 生成完整配置
-    cat > "$SINGBOX_CONF" << EOF
+    # 创建基础配置（log 和 outbounds）
+    cat > "${SINGBOX_INBOUNDS_DIR}/00_base.json" << 'EOF'
 {
-  "log": {"level": "info"},
-  "inbounds": ${inbounds},
+  "log": {"level": "info", "timestamp": true},
   "outbounds": [{"type": "direct", "tag": "direct"}]
 }
 EOF
     
-    # 验证配置
-    if $SINGBOX_BIN check -c "$SINGBOX_CONF" 2>/dev/null; then
+    # 使用 sing-box merge 命令合并配置
+    rm -f "$SINGBOX_CONF" 2>/dev/null
+    if $SINGBOX_BIN merge "$SINGBOX_CONF" -C "$SINGBOX_INBOUNDS_DIR" 2>/dev/null; then
         return 0
     else
-        log_error "配置验证失败"
-        return 1
+        # 如果 merge 失败，尝试手动合并
+        log_warn "sing-box merge 失败，尝试手动合并..."
+        ensure_cmd jq jq
+        
+        local inbounds="[]"
+        for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
+            [[ -f "$f" ]] || continue
+            [[ "$(basename "$f")" == "00_base.json" ]] && continue
+            # 从 {"inbounds": [...]} 格式中提取 inbounds 数组
+            local file_inbounds=$(cat "$f" 2>/dev/null | jq -c '.inbounds // []')
+            [[ -n "$file_inbounds" && "$file_inbounds" != "[]" ]] && inbounds=$(echo "$inbounds" | jq --argjson new "$file_inbounds" '. + $new')
+        done
+        
+        cat > "$SINGBOX_CONF" << EOF
+{
+  "log": {"level": "info", "timestamp": true},
+  "inbounds": ${inbounds},
+  "outbounds": [{"type": "direct", "tag": "direct"}]
+}
+EOF
+        
+        if $SINGBOX_BIN check -c "$SINGBOX_CONF" 2>/dev/null; then
+            return 0
+        else
+            log_error "配置验证失败"
+            return 1
+        fi
     fi
 }
 
@@ -1598,7 +1619,13 @@ add_singbox_inbound() {
     local inbound_json=$2
     
     mkdir -p "$SINGBOX_INBOUNDS_DIR"
-    echo "$inbound_json" > "${SINGBOX_INBOUNDS_DIR}/${name}.json"
+    
+    # 保存为完整的 inbounds 配置格式（用于 merge）
+    cat > "${SINGBOX_INBOUNDS_DIR}/${name}.json" << EOF
+{
+  "inbounds": [${inbound_json}]
+}
+EOF
     
     rebuild_singbox_config
 }
@@ -1609,11 +1636,12 @@ remove_singbox_inbound() {
     rm -f "${SINGBOX_INBOUNDS_DIR}/${name}.json" 2>/dev/null
     rm -f "${SINGBOX_DIR}/${name}.conf" 2>/dev/null
     
-    # 检查是否还有其他节点
-    local count=$(find "${SINGBOX_INBOUNDS_DIR}" -name "*.json" 2>/dev/null | wc -l)
+    # 检查是否还有其他节点（排除 00_base.json）
+    local count=$(find "${SINGBOX_INBOUNDS_DIR}" -name "*.json" ! -name "00_base.json" 2>/dev/null | wc -l)
     if [[ $count -eq 0 ]]; then
         service_stop sing-box
         rm -f "$SINGBOX_CONF" 2>/dev/null
+        rm -f "${SINGBOX_INBOUNDS_DIR}/00_base.json" 2>/dev/null
     else
         rebuild_singbox_config
         service_restart sing-box
