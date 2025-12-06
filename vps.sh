@@ -331,6 +331,40 @@ manage_swap() {
     esac
 }
 
+system_update_full() {
+    clear
+    print_line
+    echo -e "${CYAN}            系统更新${NC}"
+    print_line
+    
+    echo -e "${YELLOW}将执行以下操作:${NC}"
+    echo "  1. 更新软件包列表 (apt update)"
+    echo "  2. 升级已安装软件 (apt upgrade)"
+    echo "  3. 安装基础依赖 (curl wget sudo unzip socat vnstat nano)"
+    echo
+    
+    if confirm "确认执行？"; then
+        log_info "更新软件包列表..."
+        pkg_update
+        
+        log_info "升级已安装软件..."
+        pkg_upgrade
+        
+        log_info "安装基础依赖..."
+        local deps="curl wget sudo unzip socat vnstat nano"
+        for dep in $deps; do
+            echo -ne "  安装 ${dep}... "
+            if pkg_install "$dep"; then
+                echo -e "${GREEN}✓${NC}"
+            else
+                echo -e "${YELLOW}跳过${NC}"
+            fi
+        done
+        
+        log_success "系统更新完成"
+    fi
+}
+
 system_menu() {
     while true; do
         clear
@@ -338,7 +372,7 @@ system_menu() {
         echo -e "${CYAN}            系统信息与优化${NC}"
         print_line
         print_menu_item "1" "查看系统信息"
-        print_menu_item "2" "系统更新"
+        print_menu_item "2" "系统更新 (更新+安装基础依赖)"
         print_menu_item "3" "安装常用工具"
         print_menu_item "4" "时区设置"
         print_menu_item "5" "Swap 管理"
@@ -349,7 +383,7 @@ system_menu() {
         read -r -p "请选择 [0-5]: " choice
         case $choice in
             1) show_system_info; press_any_key ;;
-            2) pkg_update && pkg_upgrade; log_success "更新完成"; press_any_key ;;
+            2) system_update_full; press_any_key ;;
             3) install_common_tools; press_any_key ;;
             4) set_timezone; press_any_key ;;
             5) manage_swap; press_any_key ;;
@@ -432,6 +466,38 @@ install_bbr_v3() {
     confirm "立即重启？" && reboot
 }
 
+update_bbr_v3() {
+    clear
+    print_line
+    echo -e "${CYAN}          更新 BBR v3 内核${NC}"
+    print_line
+    
+    local current_ver=$(dpkg -l 2>/dev/null | grep "linux-image.*joeyblog" | awk '{print $3}' | head -1)
+    if [[ -z "$current_ver" ]]; then
+        log_error "未检测到 BBR v3 内核，请先安装"
+        return 1
+    fi
+    
+    echo -e "当前版本: ${GREEN}${current_ver}${NC}"
+    
+    ensure_cmd jq jq
+    local arch_filter=$([[ "$ARCH" == "arm64" ]] && echo "arm64" || echo "x86_64")
+    local release_data=$(curl -sL "https://api.github.com/repos/byJoey/Actions-bbr-v3/releases")
+    local latest_tag=$(echo "$release_data" | jq -r --arg f "$arch_filter" \
+        'map(select(.tag_name | test($f; "i"))) | sort_by(.published_at) | .[-1].tag_name')
+    
+    echo -e "最新版本: ${GREEN}${latest_tag}${NC}"
+    
+    if [[ "$current_ver" == *"$latest_tag"* ]]; then
+        log_success "已是最新版本"
+        return
+    fi
+    
+    if confirm "发现新版本，是否更新？"; then
+        install_bbr_v3
+    fi
+}
+
 bbr_menu() {
     while true; do
         clear
@@ -441,19 +507,21 @@ bbr_menu() {
         check_bbr_status
         print_line
         print_menu_item "1" "安装 BBR v3 内核"
-        print_menu_item "2" "启用 BBR + FQ"
-        print_menu_item "3" "启用 BBR + FQ_PIE"
-        print_menu_item "4" "启用 BBR + CAKE"
+        print_menu_item "2" "更新 BBR v3 内核"
+        print_menu_item "3" "启用 BBR + FQ"
+        print_menu_item "4" "启用 BBR + FQ_PIE"
+        print_menu_item "5" "启用 BBR + CAKE"
         print_line
         print_menu_item "0" "返回主菜单"
         print_line
         
-        read -r -p "请选择 [0-4]: " choice
+        read -r -p "请选择 [0-5]: " choice
         case $choice in
             1) install_bbr_v3; press_any_key ;;
-            2) enable_bbr fq; press_any_key ;;
-            3) enable_bbr fq_pie; press_any_key ;;
-            4) enable_bbr cake; press_any_key ;;
+            2) update_bbr_v3; press_any_key ;;
+            3) enable_bbr fq; press_any_key ;;
+            4) enable_bbr fq_pie; press_any_key ;;
+            5) enable_bbr cake; press_any_key ;;
             0) return ;;
         esac
     done
@@ -502,37 +570,286 @@ show_port_usage() {
     fi
 }
 
-install_fail2ban() {
+# ==================== Fail2ban 完整管理 ====================
+check_fail2ban_status() {
+    if command -v fail2ban-client &>/dev/null; then
+        local status=$(service_status fail2ban)
+        echo -e "Fail2ban: ${GREEN}已安装${NC} (${status})"
+        return 0
+    else
+        echo -e "Fail2ban: ${RED}未安装${NC}"
+        return 1
+    fi
+}
+
+install_fail2ban_full() {
     clear
     print_line
-    echo -e "${CYAN}          Fail2ban 管理${NC}"
+    echo -e "${CYAN}          安装 Fail2ban${NC}"
     print_line
     
     if command -v fail2ban-client &>/dev/null; then
-        echo -e "状态: ${GREEN}已安装${NC}"
-        fail2ban-client status 2>/dev/null
-    else
-        echo -e "状态: ${RED}未安装${NC}"
-        if confirm "安装 Fail2ban？"; then
-            pkg_install fail2ban rsyslog
-            service_enable fail2ban
-            service_start fail2ban
-            
-            local ssh_port=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}')
-            cat > /etc/fail2ban/jail.local << EOF
+        log_warn "Fail2ban 已安装"
+        return
+    fi
+    
+    log_info "安装 Fail2ban..."
+    pkg_update
+    pkg_install fail2ban rsyslog
+    
+    # 确保日志文件存在
+    [[ ! -f /var/log/auth.log ]] && touch /var/log/auth.log
+    
+    # 配置 SSH 防护
+    local ssh_port=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    ssh_port=${ssh_port:-22}
+    
+    cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+banaction = iptables-multiport
+backend = auto
+
 [sshd]
 enabled = true
-port = ${ssh_port:-22}
+port = ${ssh_port}
 filter = sshd
 logpath = /var/log/auth.log
 maxretry = 5
 findtime = 300
-bantime = 600
+bantime = 3600
 EOF
-            service_restart fail2ban
-            log_success "Fail2ban 已安装并配置"
-        fi
+    
+    service_enable fail2ban
+    service_enable rsyslog
+    service_start rsyslog
+    service_restart fail2ban
+    
+    sleep 2
+    if service_status fail2ban | grep -q "active"; then
+        log_success "Fail2ban 安装成功"
+    else
+        log_error "Fail2ban 启动失败，请检查日志"
     fi
+}
+
+show_fail2ban_status() {
+    clear
+    print_line
+    echo -e "${CYAN}        Fail2ban 运行状态${NC}"
+    print_line
+    
+    if ! command -v fail2ban-client &>/dev/null; then
+        log_error "Fail2ban 未安装"
+        return
+    fi
+    
+    echo -e "${YELLOW}【服务状态】${NC}"
+    systemctl status fail2ban --no-pager 2>/dev/null | head -10
+    echo
+    
+    echo -e "${YELLOW}【监控状态】${NC}"
+    fail2ban-client status 2>/dev/null
+    echo
+    
+    echo -e "${YELLOW}【SSH 监控详情】${NC}"
+    fail2ban-client status sshd 2>/dev/null || echo "SSH 监控未启用"
+}
+
+show_fail2ban_banned() {
+    clear
+    print_line
+    echo -e "${CYAN}        Fail2ban 封禁列表${NC}"
+    print_line
+    
+    if ! command -v fail2ban-client &>/dev/null; then
+        log_error "Fail2ban 未安装"
+        return
+    fi
+    
+    echo -e "${YELLOW}【当前封禁 IP】${NC}"
+    local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*:\s*//' | tr ',' ' ')
+    
+    if [[ -z "$jails" ]]; then
+        echo "无活动监控"
+        return
+    fi
+    
+    for jail in $jails; do
+        echo -e "\n${GREEN}[$jail]${NC}"
+        local banned=$(fail2ban-client status "$jail" 2>/dev/null | grep "Banned IP" | sed 's/.*:\s*//')
+        if [[ -n "$banned" && "$banned" != " " ]]; then
+            echo "$banned" | tr ' ' '\n' | while read ip; do
+                [[ -n "$ip" ]] && echo "  - $ip"
+            done
+        else
+            echo "  无封禁"
+        fi
+    done
+    
+    echo
+    echo -e "${YELLOW}【手动解封】${NC}"
+    read -r -p "输入要解封的 IP (留空跳过): " unban_ip
+    if [[ -n "$unban_ip" ]]; then
+        for jail in $jails; do
+            fail2ban-client set "$jail" unbanip "$unban_ip" 2>/dev/null
+        done
+        log_success "已解封 $unban_ip"
+    fi
+}
+
+edit_fail2ban_config() {
+    clear
+    print_line
+    echo -e "${CYAN}        编辑 Fail2ban 配置${NC}"
+    print_line
+    
+    if [[ ! -f /etc/fail2ban/jail.local ]]; then
+        log_error "配置文件不存在"
+        return
+    fi
+    
+    echo -e "${YELLOW}【当前配置】${NC}"
+    cat /etc/fail2ban/jail.local
+    print_line
+    
+    echo -e "${YELLOW}【快速修改】${NC}"
+    print_menu_item "1" "修改封禁时间"
+    print_menu_item "2" "修改最大重试次数"
+    print_menu_item "3" "修改检测时间窗口"
+    print_menu_item "4" "修改 SSH 端口"
+    print_menu_item "5" "使用编辑器编辑"
+    print_menu_item "0" "返回"
+    print_line
+    
+    read -r -p "请选择 [0-5]: " choice
+    case $choice in
+        1)
+            read -r -p "封禁时间 (秒，当前默认3600): " bantime
+            [[ "$bantime" =~ ^[0-9]+$ ]] && sed -i "s/^bantime = .*/bantime = ${bantime}/" /etc/fail2ban/jail.local
+            ;;
+        2)
+            read -r -p "最大重试次数 (当前默认5): " maxretry
+            [[ "$maxretry" =~ ^[0-9]+$ ]] && sed -i "s/^maxretry = .*/maxretry = ${maxretry}/" /etc/fail2ban/jail.local
+            ;;
+        3)
+            read -r -p "检测时间窗口 (秒，当前默认600): " findtime
+            [[ "$findtime" =~ ^[0-9]+$ ]] && sed -i "s/^findtime = .*/findtime = ${findtime}/" /etc/fail2ban/jail.local
+            ;;
+        4)
+            read -r -p "SSH 端口: " port
+            [[ "$port" =~ ^[0-9]+$ ]] && sed -i "s/^port = .*/port = ${port}/" /etc/fail2ban/jail.local
+            ;;
+        5)
+            if command -v nano &>/dev/null; then
+                nano /etc/fail2ban/jail.local
+            elif command -v vim &>/dev/null; then
+                vim /etc/fail2ban/jail.local
+            else
+                vi /etc/fail2ban/jail.local
+            fi
+            ;;
+        0) return ;;
+    esac
+    
+    if [[ "$choice" =~ ^[1-4]$ ]]; then
+        service_restart fail2ban
+        log_success "配置已更新并重启服务"
+    fi
+}
+
+update_fail2ban() {
+    clear
+    print_line
+    echo -e "${CYAN}          更新 Fail2ban${NC}"
+    print_line
+    
+    if ! command -v fail2ban-client &>/dev/null; then
+        log_error "Fail2ban 未安装"
+        return
+    fi
+    
+    local current_ver=$(fail2ban-client --version 2>/dev/null | head -1)
+    echo -e "当前版本: ${GREEN}${current_ver}${NC}"
+    
+    if confirm "确认更新 Fail2ban？"; then
+        log_info "更新中..."
+        pkg_update
+        case $OS in
+            ubuntu|debian|linuxmint)
+                apt-get install --only-upgrade -y fail2ban
+                ;;
+            centos|rhel|fedora|rocky|almalinux)
+                yum update -y fail2ban || dnf update -y fail2ban
+                ;;
+        esac
+        service_restart fail2ban
+        local new_ver=$(fail2ban-client --version 2>/dev/null | head -1)
+        log_success "更新完成: ${new_ver}"
+    fi
+}
+
+uninstall_fail2ban() {
+    clear
+    print_line
+    echo -e "${CYAN}          卸载 Fail2ban${NC}"
+    print_line
+    
+    if ! command -v fail2ban-client &>/dev/null; then
+        log_error "Fail2ban 未安装"
+        return
+    fi
+    
+    if confirm "确认卸载 Fail2ban？"; then
+        log_info "卸载中..."
+        service_stop fail2ban
+        case $OS in
+            ubuntu|debian|linuxmint)
+                apt-get remove --purge -y fail2ban
+                apt-get autoremove -y
+                ;;
+            centos|rhel|fedora|rocky|almalinux)
+                yum remove -y fail2ban || dnf remove -y fail2ban
+                ;;
+        esac
+        rm -rf /etc/fail2ban
+        log_success "Fail2ban 已卸载"
+    fi
+}
+
+fail2ban_menu() {
+    while true; do
+        clear
+        print_line
+        echo -e "${CYAN}          Fail2ban 管理${NC}"
+        print_line
+        check_fail2ban_status
+        print_line
+        print_menu_item "1" "安装 Fail2ban"
+        print_menu_item "2" "查看运行状态"
+        print_menu_item "3" "查看封禁列表"
+        print_menu_item "4" "编辑配置"
+        print_menu_item "5" "重启服务"
+        print_menu_item "6" "更新 Fail2ban"
+        print_menu_item "7" "卸载 Fail2ban"
+        print_line
+        print_menu_item "0" "返回"
+        print_line
+        
+        read -r -p "请选择 [0-7]: " choice
+        case $choice in
+            1) install_fail2ban_full; press_any_key ;;
+            2) show_fail2ban_status; press_any_key ;;
+            3) show_fail2ban_banned; press_any_key ;;
+            4) edit_fail2ban_config; press_any_key ;;
+            5) service_restart fail2ban; log_success "已重启"; press_any_key ;;
+            6) update_fail2ban; press_any_key ;;
+            7) uninstall_fail2ban; press_any_key ;;
+            0) return ;;
+        esac
+    done
 }
 
 security_menu() {
@@ -554,7 +871,7 @@ security_menu() {
             1) passwd root; press_any_key ;;
             2) change_ssh_port; press_any_key ;;
             3) show_port_usage; press_any_key ;;
-            4) install_fail2ban; press_any_key ;;
+            4) fail2ban_menu ;;
             0) return ;;
         esac
     done
@@ -794,6 +1111,7 @@ EOF
     
     log_success "Snell 安装成功"
     show_snell_config
+    press_any_key
 }
 
 show_snell_config() {
@@ -818,6 +1136,7 @@ show_snell_config() {
     print_line
     
     command -v qrencode &>/dev/null && echo "$config" | qrencode -o - -t ANSIUTF8
+    print_line
 }
 
 snell_menu() {
@@ -839,9 +1158,9 @@ snell_menu() {
         
         read -r -p "请选择 [0-5]: " choice
         case $choice in
-            1) install_snell "4.1.1"; press_any_key ;;
-            2) install_snell "5.0.1"; press_any_key ;;
-            3) show_snell_config; press_any_key ;;
+            1) install_snell "4.1.1" ;;
+            2) install_snell "5.0.1" ;;
+            3) clear; show_snell_config; press_any_key ;;
             4) service_restart snell-server; log_success "已重启"; press_any_key ;;
             5)
                 if confirm "确认卸载？"; then
@@ -1182,6 +1501,312 @@ EOF
     show_hysteria2
 }
 
+install_vmess_ws() {
+    clear
+    print_line
+    echo -e "${CYAN}        安装 VMess + WS + TLS${NC}"
+    print_line
+    
+    [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    ensure_cmd openssl openssl
+    
+    local port uuid path domain
+    read -r -p "端口 (默认443): " port; port=${port:-443}
+    read -r -p "UUID (默认随机): " uuid; uuid=${uuid:-$($SINGBOX_BIN generate uuid)}
+    read -r -p "WS路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
+    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
+    
+    # 自签证书
+    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
+    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    
+    cat > "$SINGBOX_CONF" << EOF
+{"log":{"level":"info"},"inbounds":[{"type":"vmess","tag":"vmess-ws","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+EOF
+    
+    cat > "${SINGBOX_DIR}/vmess-ws.conf" << EOF
+PORT=${port}
+UUID=${uuid}
+PATH=${path}
+DOMAIN=${domain}
+EOF
+    
+    service_enable sing-box
+    service_restart sing-box
+    firewall_allow_port "$port" tcp
+    
+    sleep 2
+    log_success "VMess WS TLS 安装成功"
+    show_vmess_ws
+}
+
+show_vmess_ws() {
+    [[ ! -f "${SINGBOX_DIR}/vmess-ws.conf" ]] && { log_error "未安装"; return; }
+    source "${SINGBOX_DIR}/vmess-ws.conf"
+    local ip=$(get_ipv4)
+    
+    print_line
+    echo -e "${YELLOW}【VMess + WS + TLS 节点】${NC}"
+    echo -e "  服务器: ${GREEN}${ip}${NC}"
+    echo -e "  端口:   ${GREEN}${PORT}${NC}"
+    echo -e "  UUID:   ${GREEN}${UUID}${NC}"
+    echo -e "  路径:   ${GREEN}${PATH}${NC}"
+    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    print_line
+    
+    local vmess_json="{\"v\":\"2\",\"ps\":\"VMess-WS\",\"add\":\"${ip}\",\"port\":\"${PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+    local link="vmess://$(echo -n "$vmess_json" | base64 -w 0)"
+    echo -e "${YELLOW}【分享链接】${NC}"
+    echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+}
+
+install_vless_ws() {
+    clear
+    print_line
+    echo -e "${CYAN}        安装 VLESS + WS + TLS${NC}"
+    print_line
+    
+    [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    ensure_cmd openssl openssl
+    
+    local port uuid path domain
+    read -r -p "端口 (默认443): " port; port=${port:-443}
+    read -r -p "UUID (默认随机): " uuid; uuid=${uuid:-$($SINGBOX_BIN generate uuid)}
+    read -r -p "WS路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
+    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
+    
+    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
+    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    
+    cat > "$SINGBOX_CONF" << EOF
+{"log":{"level":"info"},"inbounds":[{"type":"vless","tag":"vless-ws","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+EOF
+    
+    cat > "${SINGBOX_DIR}/vless-ws.conf" << EOF
+PORT=${port}
+UUID=${uuid}
+PATH=${path}
+DOMAIN=${domain}
+EOF
+    
+    service_enable sing-box
+    service_restart sing-box
+    firewall_allow_port "$port" tcp
+    
+    sleep 2
+    log_success "VLESS WS TLS 安装成功"
+    show_vless_ws
+}
+
+show_vless_ws() {
+    [[ ! -f "${SINGBOX_DIR}/vless-ws.conf" ]] && { log_error "未安装"; return; }
+    source "${SINGBOX_DIR}/vless-ws.conf"
+    local ip=$(get_ipv4)
+    
+    print_line
+    echo -e "${YELLOW}【VLESS + WS + TLS 节点】${NC}"
+    echo -e "  服务器: ${GREEN}${ip}${NC}"
+    echo -e "  端口:   ${GREEN}${PORT}${NC}"
+    echo -e "  UUID:   ${GREEN}${UUID}${NC}"
+    echo -e "  路径:   ${GREEN}${PATH}${NC}"
+    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    print_line
+    
+    local link="vless://${UUID}@${ip}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${PATH}#VLESS-WS"
+    echo -e "${YELLOW}【分享链接】${NC}"
+    echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+}
+
+install_trojan_ws() {
+    clear
+    print_line
+    echo -e "${CYAN}      安装 Trojan + WS + TLS${NC}"
+    print_line
+    
+    [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    ensure_cmd openssl openssl
+    
+    local port password path domain
+    read -r -p "端口 (默认443): " port; port=${port:-443}
+    read -r -p "密码 (默认随机): " password; password=${password:-$(random_string 16)}
+    read -r -p "WS路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
+    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
+    
+    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
+    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    
+    cat > "$SINGBOX_CONF" << EOF
+{"log":{"level":"info"},"inbounds":[{"type":"trojan","tag":"trojan-ws","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+EOF
+    
+    cat > "${SINGBOX_DIR}/trojan-ws.conf" << EOF
+PORT=${port}
+PASSWORD=${password}
+PATH=${path}
+DOMAIN=${domain}
+EOF
+    
+    service_enable sing-box
+    service_restart sing-box
+    firewall_allow_port "$port" tcp
+    
+    sleep 2
+    log_success "Trojan WS TLS 安装成功"
+    show_trojan_ws
+}
+
+show_trojan_ws() {
+    [[ ! -f "${SINGBOX_DIR}/trojan-ws.conf" ]] && { log_error "未安装"; return; }
+    source "${SINGBOX_DIR}/trojan-ws.conf"
+    local ip=$(get_ipv4)
+    
+    print_line
+    echo -e "${YELLOW}【Trojan + WS + TLS 节点】${NC}"
+    echo -e "  服务器: ${GREEN}${ip}${NC}"
+    echo -e "  端口:   ${GREEN}${PORT}${NC}"
+    echo -e "  密码:   ${GREEN}${PASSWORD}${NC}"
+    echo -e "  路径:   ${GREEN}${PATH}${NC}"
+    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    print_line
+    
+    local link="trojan://${PASSWORD}@${ip}:${PORT}?security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${PATH}#Trojan-WS"
+    echo -e "${YELLOW}【分享链接】${NC}"
+    echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+}
+
+install_trojan_http() {
+    clear
+    print_line
+    echo -e "${CYAN}     安装 Trojan + HTTP + TLS${NC}"
+    print_line
+    
+    [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    ensure_cmd openssl openssl
+    
+    local port password path domain
+    read -r -p "端口 (默认443): " port; port=${port:-443}
+    read -r -p "密码 (默认随机): " password; password=${password:-$(random_string 16)}
+    read -r -p "HTTP路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
+    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
+    
+    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
+    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    
+    cat > "$SINGBOX_CONF" << EOF
+{"log":{"level":"info"},"inbounds":[{"type":"trojan","tag":"trojan-http","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"transport":{"type":"http","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+EOF
+    
+    cat > "${SINGBOX_DIR}/trojan-http.conf" << EOF
+PORT=${port}
+PASSWORD=${password}
+PATH=${path}
+DOMAIN=${domain}
+EOF
+    
+    service_enable sing-box
+    service_restart sing-box
+    firewall_allow_port "$port" tcp
+    
+    sleep 2
+    log_success "Trojan HTTP TLS 安装成功"
+    show_trojan_http
+}
+
+show_trojan_http() {
+    [[ ! -f "${SINGBOX_DIR}/trojan-http.conf" ]] && { log_error "未安装"; return; }
+    source "${SINGBOX_DIR}/trojan-http.conf"
+    local ip=$(get_ipv4)
+    
+    print_line
+    echo -e "${YELLOW}【Trojan + HTTP + TLS 节点】${NC}"
+    echo -e "  服务器: ${GREEN}${ip}${NC}"
+    echo -e "  端口:   ${GREEN}${PORT}${NC}"
+    echo -e "  密码:   ${GREEN}${PASSWORD}${NC}"
+    echo -e "  路径:   ${GREEN}${PATH}${NC}"
+    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    print_line
+    
+    local link="trojan://${PASSWORD}@${ip}:${PORT}?security=tls&sni=${DOMAIN}&type=http&host=${DOMAIN}&path=${PATH}#Trojan-HTTP"
+    echo -e "${YELLOW}【分享链接】${NC}"
+    echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+}
+
+install_tuic() {
+    clear
+    print_line
+    echo -e "${CYAN}            安装 TUIC${NC}"
+    print_line
+    
+    [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    ensure_cmd openssl openssl
+    
+    local port uuid password domain
+    read -r -p "端口 (默认随机): " port; port=${port:-$(get_available_port)}
+    read -r -p "UUID (默认随机): " uuid; uuid=${uuid:-$($SINGBOX_BIN generate uuid)}
+    read -r -p "密码 (默认随机): " password; password=${password:-$(random_string 16)}
+    domain="www.bing.com"
+    
+    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
+    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    
+    cat > "$SINGBOX_CONF" << EOF
+{"log":{"level":"info"},"inbounds":[{"type":"tuic","tag":"tuic","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}","password":"${password}"}],"congestion_control":"bbr","tls":{"enabled":true,"alpn":["h3"],"certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+EOF
+    
+    cat > "${SINGBOX_DIR}/tuic.conf" << EOF
+PORT=${port}
+UUID=${uuid}
+PASSWORD=${password}
+DOMAIN=${domain}
+EOF
+    
+    service_enable sing-box
+    service_restart sing-box
+    firewall_allow_port "$port" udp
+    
+    sleep 2
+    log_success "TUIC 安装成功"
+    show_tuic
+}
+
+show_tuic() {
+    [[ ! -f "${SINGBOX_DIR}/tuic.conf" ]] && { log_error "未安装"; return; }
+    source "${SINGBOX_DIR}/tuic.conf"
+    local ip=$(get_ipv4)
+    
+    print_line
+    echo -e "${YELLOW}【TUIC 节点】${NC}"
+    echo -e "  服务器: ${GREEN}${ip}${NC}"
+    echo -e "  端口:   ${GREEN}${PORT}${NC}"
+    echo -e "  UUID:   ${GREEN}${UUID}${NC}"
+    echo -e "  密码:   ${GREEN}${PASSWORD}${NC}"
+    print_line
+    
+    local link="tuic://${UUID}:${PASSWORD}@${ip}:${PORT}?congestion_control=bbr&alpn=h3&sni=${DOMAIN}&udp_relay_mode=native&allow_insecure=1#TUIC"
+    echo -e "${YELLOW}【分享链接】${NC}"
+    echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    local loon="TUIC = TUIC,${ip},${PORT},\"${UUID}\",\"${PASSWORD}\",sni=${DOMAIN},skip-cert-verify=true,udp=true"
+    echo -e "${YELLOW}【Loon 配置】${NC}"
+    echo -e "${CYAN}${loon}${NC}"
+    print_line
+    
+    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+}
+
 show_hysteria2() {
     [[ ! -f "${SINGBOX_DIR}/hysteria2.conf" ]] && { log_error "未安装"; return; }
     source "${SINGBOX_DIR}/hysteria2.conf"
@@ -1208,6 +1833,24 @@ show_hysteria2() {
     command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
 }
 
+show_all_singbox_nodes() {
+    clear
+    print_line
+    echo -e "${CYAN}        Sing-box 节点信息${NC}"
+    print_line
+    
+    local found=0
+    [[ -f "${SINGBOX_DIR}/reality.conf" ]] && { show_vless_reality; found=1; echo; }
+    [[ -f "${SINGBOX_DIR}/hysteria2.conf" ]] && { show_hysteria2; found=1; echo; }
+    [[ -f "${SINGBOX_DIR}/vmess-ws.conf" ]] && { show_vmess_ws; found=1; echo; }
+    [[ -f "${SINGBOX_DIR}/vless-ws.conf" ]] && { show_vless_ws; found=1; echo; }
+    [[ -f "${SINGBOX_DIR}/trojan-ws.conf" ]] && { show_trojan_ws; found=1; echo; }
+    [[ -f "${SINGBOX_DIR}/trojan-http.conf" ]] && { show_trojan_http; found=1; echo; }
+    [[ -f "${SINGBOX_DIR}/tuic.conf" ]] && { show_tuic; found=1; echo; }
+    
+    [[ $found -eq 0 ]] && log_warn "未安装任何节点"
+}
+
 singbox_menu() {
     while true; do
         clear
@@ -1216,26 +1859,36 @@ singbox_menu() {
         print_line
         check_singbox
         print_line
-        print_menu_item "1" "安装 VLESS + Reality"
-        print_menu_item "2" "安装 Hysteria2"
-        print_menu_item "3" "查看节点信息"
-        print_menu_item "4" "重启服务"
-        print_menu_item "5" "卸载"
+        echo -e "${YELLOW}【Reality 系列】${NC}"
+        print_menu_item "1" "VLESS + Reality + Vision"
+        echo -e "${YELLOW}【TLS 系列】${NC}"
+        print_menu_item "2" "VMess + WS + TLS"
+        print_menu_item "3" "VLESS + WS + TLS"
+        print_menu_item "4" "Trojan + WS + TLS"
+        print_menu_item "5" "Trojan + HTTP + TLS"
+        echo -e "${YELLOW}【UDP 系列】${NC}"
+        print_menu_item "6" "Hysteria2"
+        print_menu_item "7" "TUIC"
+        print_line
+        print_menu_item "8" "查看节点信息"
+        print_menu_item "9" "重启服务"
+        print_menu_item "10" "卸载"
         print_line
         print_menu_item "0" "返回"
         print_line
         
-        read -r -p "请选择 [0-5]: " choice
+        read -r -p "请选择 [0-10]: " choice
         case $choice in
             1) install_vless_reality; press_any_key ;;
-            2) install_hysteria2; press_any_key ;;
-            3)
-                [[ -f "${SINGBOX_DIR}/reality.conf" ]] && show_vless_reality
-                [[ -f "${SINGBOX_DIR}/hysteria2.conf" ]] && show_hysteria2
-                press_any_key
-                ;;
-            4) service_restart sing-box; log_success "已重启"; press_any_key ;;
-            5)
+            2) install_vmess_ws; press_any_key ;;
+            3) install_vless_ws; press_any_key ;;
+            4) install_trojan_ws; press_any_key ;;
+            5) install_trojan_http; press_any_key ;;
+            6) install_hysteria2; press_any_key ;;
+            7) install_tuic; press_any_key ;;
+            8) show_all_singbox_nodes; press_any_key ;;
+            9) service_restart sing-box; log_success "已重启"; press_any_key ;;
+            10)
                 if confirm "确认卸载？"; then
                     service_stop sing-box
                     rm -f /etc/systemd/system/sing-box.service "$SINGBOX_BIN"
@@ -1258,7 +1911,9 @@ proxy_menu() {
         echo -e "${CYAN}              节点搭建${NC}"
         print_line
         print_menu_item "1" "Snell 节点 (v4/v5)"
-        print_menu_item "2" "Sing-box 多协议 (Reality/Hy2)"
+        print_menu_item "2" "Sing-box 多协议"
+        echo -e "     ${GREEN}├─${NC} VLESS+Reality, VMess+WS, VLESS+WS"
+        echo -e "     ${GREEN}├─${NC} Trojan+WS, Trojan+HTTP, Hysteria2, TUIC"
         print_menu_item "3" "SS2022 + Shadow-TLS"
         print_line
         print_menu_item "4" "查看所有节点"
@@ -1276,10 +1931,17 @@ proxy_menu() {
                 print_line
                 echo -e "${CYAN}          已安装节点信息${NC}"
                 print_line
-                [[ -f "$SNELL_CONF" ]] && show_snell_config && echo
-                [[ -f "$SS_CONF" ]] && show_ss2022_config && echo
-                [[ -f "${SINGBOX_DIR}/reality.conf" ]] && show_vless_reality && echo
-                [[ -f "${SINGBOX_DIR}/hysteria2.conf" ]] && show_hysteria2 && echo
+                local found=0
+                [[ -f "$SNELL_CONF" ]] && { show_snell_config; found=1; echo; }
+                [[ -f "$SS_CONF" ]] && { show_ss2022_config; found=1; echo; }
+                [[ -f "${SINGBOX_DIR}/reality.conf" ]] && { show_vless_reality; found=1; echo; }
+                [[ -f "${SINGBOX_DIR}/hysteria2.conf" ]] && { show_hysteria2; found=1; echo; }
+                [[ -f "${SINGBOX_DIR}/vmess-ws.conf" ]] && { show_vmess_ws; found=1; echo; }
+                [[ -f "${SINGBOX_DIR}/vless-ws.conf" ]] && { show_vless_ws; found=1; echo; }
+                [[ -f "${SINGBOX_DIR}/trojan-ws.conf" ]] && { show_trojan_ws; found=1; echo; }
+                [[ -f "${SINGBOX_DIR}/trojan-http.conf" ]] && { show_trojan_http; found=1; echo; }
+                [[ -f "${SINGBOX_DIR}/tuic.conf" ]] && { show_tuic; found=1; echo; }
+                [[ $found -eq 0 ]] && log_warn "未安装任何节点"
                 press_any_key
                 ;;
             0) return ;;
