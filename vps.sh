@@ -7,6 +7,13 @@
 # 版本: 1.0.0
 #
 
+# ==================== 配置 ====================
+SCRIPT_VERSION="1.0.0"
+SCRIPT_NAME="VPS-Toolkit"
+GITHUB_RAW="https://raw.githubusercontent.com/your-username/vps-toolkit/main"
+SCRIPT_URL="${GITHUB_RAW}/vps.sh"
+INSTALL_PATH="/usr/local/bin/vps"
+
 # 强制设置 PATH
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export LANG=C.UTF-8
@@ -17,26 +24,80 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# ==================== 安装/更新脚本 ====================
+install_script() {
+    echo "正在安装 VPS 工具箱..."
+    curl -sL "$SCRIPT_URL" -o "$INSTALL_PATH" || {
+        echo "下载失败，请检查网络"
+        return 1
+    }
+    chmod +x "$INSTALL_PATH"
+    echo "安装成功！现在可以通过 'vps' 命令启动"
+}
+
+update_script() {
+    echo "正在检查更新..."
+    local remote_ver
+    remote_ver=$(curl -sL "$SCRIPT_URL" 2>/dev/null | grep -m1 'SCRIPT_VERSION=' | cut -d'"' -f2)
+    
+    if [[ -z "$remote_ver" ]]; then
+        echo "无法获取远程版本"
+        return 1
+    fi
+    
+    echo "当前版本: ${SCRIPT_VERSION}"
+    echo "最新版本: ${remote_ver}"
+    
+    if [[ "$SCRIPT_VERSION" == "$remote_ver" ]]; then
+        echo "已是最新版本"
+        return 0
+    fi
+    
+    echo "发现新版本，正在更新..."
+    curl -sL "$SCRIPT_URL" -o "$INSTALL_PATH" || {
+        echo "更新失败"
+        return 1
+    }
+    chmod +x "$INSTALL_PATH"
+    echo "更新成功！请重新运行 vps"
+    exit 0
+}
+
+uninstall_script() {
+    echo "正在卸载..."
+    rm -f "$INSTALL_PATH"
+    echo "已卸载，感谢使用！"
+    exit 0
+}
+
+# 首次运行时自动安装
+if [[ ! -f "$INSTALL_PATH" ]]; then
+    install_script
+fi
+
 # 首先安装基础工具（在任何其他操作之前）
 install_base_deps() {
-    # 检查是否缺少基础命令
-    local missing=""
-    /usr/bin/which awk >/dev/null 2>&1 || missing="$missing gawk"
-    /usr/bin/which sed >/dev/null 2>&1 || missing="$missing sed"
-    /usr/bin/which clear >/dev/null 2>&1 || missing="$missing ncurses-bin"
-    /usr/bin/which curl >/dev/null 2>&1 || missing="$missing curl"
-    /usr/bin/which wget >/dev/null 2>&1 || missing="$missing wget"
+    # 直接安装所有可能需要的基础包，避免检测逻辑依赖缺失的命令
+    local need_install=0
     
-    if [[ -n "$missing" ]]; then
-        echo "安装基础依赖:$missing"
-        if [[ -f /usr/bin/apt-get ]]; then
-            /usr/bin/apt-get update -qq >/dev/null 2>&1
-            /usr/bin/apt-get install -y $missing >/dev/null 2>&1
-        elif [[ -f /usr/bin/yum ]]; then
-            /usr/bin/yum install -y $missing >/dev/null 2>&1
+    # 简单检测几个关键命令
+    command -v awk >/dev/null 2>&1 || need_install=1
+    command -v sed >/dev/null 2>&1 || need_install=1
+    command -v head >/dev/null 2>&1 || need_install=1
+    command -v curl >/dev/null 2>&1 || need_install=1
+    
+    if [[ $need_install -eq 1 ]]; then
+        echo "安装基础依赖..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq >/dev/null 2>&1
+            apt-get install -y coreutils gawk sed grep curl wget ncurses-bin >/dev/null 2>&1
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y coreutils gawk sed grep curl wget ncurses >/dev/null 2>&1
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y coreutils gawk sed grep curl wget ncurses >/dev/null 2>&1
         fi
-        # 重新加载 PATH
-        hash -r
+        # 重新加载命令缓存
+        hash -r 2>/dev/null
     fi
 }
 install_base_deps
@@ -45,9 +106,6 @@ install_base_deps
 if ! command -v clear &>/dev/null; then
     clear() { printf '\033[2J\033[H'; }
 fi
-
-SCRIPT_VERSION="1.0.0"
-SCRIPT_NAME="VPS-Toolkit"
 
 # ==================== 颜色定义 ====================
 RED='\033[0;31m'
@@ -63,14 +121,34 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 
+# URL 编码函数（纯 bash 实现，不依赖外部命令）
+urlencode() {
+    local string="$1"
+    local strlen=${#string}
+    local encoded=""
+    local pos c o
+    
+    for (( pos=0 ; pos<strlen ; pos++ )); do
+        c=${string:$pos:1}
+        case "$c" in
+            [-_.~a-zA-Z0-9]) o="$c" ;;
+            *) printf -v o '%%%02X' "'$c" ;;
+        esac
+        encoded+="$o"
+    done
+    echo "$encoded"
+}
+
 # 生成在线二维码链接
 show_qrcode() {
     local content=$1
-    # URL 编码
-    local encoded=$(echo -n "$content" | sed 's/:/%3A/g; s/\//%2F/g; s/?/%3F/g; s/=/%3D/g; s/&/%26/g; s/@/%40/g; s/#/%23/g; s/ /%20/g')
+    local encoded
+    encoded=$(urlencode "$content")
     local qr_url="https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encoded}"
+    echo ""
     echo -e "${YELLOW}【在线二维码】${NC}"
     echo -e "${GREEN}${qr_url}${NC}"
+    echo ""
 }
 
 print_line() {
@@ -220,8 +298,24 @@ get_ip_location() {
 
 press_any_key() {
     echo
-    read -n 1 -s -r -p "按任意键继续..."
+    echo -n "按任意键继续..."
+    # 使用 read 但忽略转义序列
+    local key
+    IFS= read -rsn1 key 2>/dev/null || true
+    # 如果是转义序列开头，读取剩余部分并丢弃
+    if [[ "$key" == $'\x1b' ]]; then
+        read -rsn2 -t 0.1 _ 2>/dev/null || true
+    fi
     echo
+}
+
+# 安全的菜单输入函数 - 禁用鼠标事件
+disable_mouse() {
+    # 禁用终端鼠标报告模式
+    printf '\e[?1000l' 2>/dev/null
+    printf '\e[?1002l' 2>/dev/null
+    printf '\e[?1003l' 2>/dev/null
+    printf '\e[?1006l' 2>/dev/null
 }
 
 # ==================== 服务管理 ====================
@@ -1523,9 +1617,22 @@ SINGBOX_INBOUNDS_DIR="${SINGBOX_DIR}/inbounds"
 
 check_singbox() {
     if [[ -f "$SINGBOX_BIN" ]]; then
-        local ver=$($SINGBOX_BIN version 2>/dev/null | head -1 | awk '{print $NF}')
+        local ver
+        local ver_output
+        ver_output=$($SINGBOX_BIN version 2>/dev/null)
+        # 纯 bash 方式提取版本号
+        if [[ -n "$ver_output" ]]; then
+            local first_line="${ver_output%%$'\n'*}"
+            ver="${first_line##* }"
+        fi
         local status=$(service_status sing-box)
-        local count=$(find "${SINGBOX_INBOUNDS_DIR}" -name "*.json" ! -name "00_base.json" 2>/dev/null | wc -l)
+        # 纯 bash 方式计数文件
+        local count=0
+        if [[ -d "${SINGBOX_INBOUNDS_DIR}" ]]; then
+            for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
+                [[ -f "$f" && "$(basename "$f")" != "00_base.json" ]] && ((count++))
+            done
+        fi
         echo -e "Sing-box: ${GREEN}${ver:-未知}${NC} (${status}) - ${GREEN}${count}${NC} 个节点"
         return 0
     else
@@ -1639,8 +1746,13 @@ remove_singbox_inbound() {
     rm -f "${SINGBOX_INBOUNDS_DIR}/${name}.json" 2>/dev/null
     rm -f "${SINGBOX_DIR}/${name}.conf" 2>/dev/null
     
-    # 检查是否还有其他节点（排除 00_base.json）
-    local count=$(find "${SINGBOX_INBOUNDS_DIR}" -name "*.json" ! -name "00_base.json" 2>/dev/null | wc -l)
+    # 检查是否还有其他节点（排除 00_base.json）- 纯 bash 方式
+    local count=0
+    if [[ -d "${SINGBOX_INBOUNDS_DIR}" ]]; then
+        for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
+            [[ -f "$f" && "$(basename "$f")" != "00_base.json" ]] && ((count++))
+        done
+    fi
     if [[ $count -eq 0 ]]; then
         service_stop sing-box
         rm -f "$SINGBOX_CONF" 2>/dev/null
@@ -2394,10 +2506,12 @@ show_main_menu() {
         print_menu_item "5" "Docker 管理"
         print_menu_item "6" "面板管理"
         print_line
+        print_menu_item "7" "更新脚本"
+        print_menu_item "8" "卸载脚本"
         print_menu_item "0" "退出脚本"
         print_line
         
-        read -r -p "请选择 [0-6]: " choice
+        read -r -p "请选择 [0-8]: " choice
         case $choice in
             1) system_menu ;;
             2) bbr_menu ;;
@@ -2405,6 +2519,8 @@ show_main_menu() {
             4) proxy_menu ;;
             5) docker_menu ;;
             6) panel_menu ;;
+            7) update_script; press_any_key ;;
+            8) confirm "确认卸载脚本？" && uninstall_script ;;
             0) echo; log_info "再见！"; exit 0 ;;
             *) log_error "无效选项" && sleep 1 ;;
         esac
@@ -2417,6 +2533,8 @@ main() {
     detect_os
     detect_arch
     detect_virt
+    # 禁用终端鼠标事件，防止右键干扰
+    disable_mouse
     show_main_menu
 }
 
