@@ -7,16 +7,68 @@
 # 版本: 1.0.0
 #
 
+# ==================== 最先执行：修复 PATH ====================
+# 确保所有标准路径都在 PATH 中（放在最前面）
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export LANG=C.UTF-8
+export LC_ALL=C
+
+# 查找命令的绝对路径
+_find_cmd() {
+    local cmd=$1
+    local paths="/usr/bin /bin /usr/sbin /sbin /usr/local/bin"
+    for p in $paths; do
+        [[ -x "$p/$cmd" ]] && echo "$p/$cmd" && return 0
+    done
+    return 1
+}
+
+# 定义关键命令（使用绝对路径或内置）
+RM=$(_find_cmd rm) || RM="rm"
+MKDIR=$(_find_cmd mkdir) || MKDIR="mkdir"
+CAT=$(_find_cmd cat) || CAT="cat"
+SYSTEMCTL=$(_find_cmd systemctl) || SYSTEMCTL="systemctl"
+SLEEP=$(_find_cmd sleep) || SLEEP="sleep"
+
+# 立即安装基础依赖（在任何其他代码之前）
+_install_deps() {
+    local need=0
+    command -v awk >/dev/null 2>&1 || need=1
+    command -v sed >/dev/null 2>&1 || need=1
+    command -v curl >/dev/null 2>&1 || need=1
+    [[ -x "$RM" ]] || need=1
+    
+    if [[ $need -eq 1 ]]; then
+        echo "正在安装基础系统工具..."
+        if [[ -x /usr/bin/apt-get ]]; then
+            /usr/bin/apt-get update -qq 2>/dev/null
+            /usr/bin/apt-get install -y coreutils systemd gawk sed grep curl wget iproute2 ncurses-bin procps 2>/dev/null
+        elif [[ -x /usr/bin/yum ]]; then
+            /usr/bin/yum install -y coreutils systemd gawk sed grep curl wget iproute ncurses procps-ng 2>/dev/null
+        elif [[ -x /usr/bin/dnf ]]; then
+            /usr/bin/dnf install -y coreutils systemd gawk sed grep curl wget iproute ncurses procps-ng 2>/dev/null
+        fi
+        hash -r 2>/dev/null
+        # 重新查找命令
+        RM=$(_find_cmd rm) || RM="rm"
+        SYSTEMCTL=$(_find_cmd systemctl) || SYSTEMCTL="systemctl"
+    fi
+}
+_install_deps
+
+# 定义命令包装函数（确保使用正确的路径）
+rm() { command $RM "$@"; }
+mkdir() { command $MKDIR "$@"; }
+cat() { command $CAT "$@"; }
+systemctl() { command $SYSTEMCTL "$@"; }
+sleep() { command $SLEEP "$@"; }
+
 # ==================== 配置 ====================
 SCRIPT_VERSION="1.0.0"
 SCRIPT_NAME="VPS-Toolkit"
 GITHUB_RAW="https://raw.githubusercontent.com/your-username/vps-toolkit/main"
 SCRIPT_URL="${GITHUB_RAW}/vps.sh"
 INSTALL_PATH="/usr/local/bin/vps"
-
-# 强制设置 PATH
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export LANG=C.UTF-8
 
 # 检查是否为 root
 if [[ $EUID -ne 0 ]]; then
@@ -37,11 +89,25 @@ install_script() {
 
 update_script() {
     echo "正在检查更新..."
-    local remote_ver
-    remote_ver=$(curl -sL "$SCRIPT_URL" 2>/dev/null | grep -m1 'SCRIPT_VERSION=' | cut -d'"' -f2)
+    echo "更新源: ${SCRIPT_URL}"
+    echo ""
+    
+    local remote_content remote_ver
+    remote_content=$(curl -sL --connect-timeout 10 "$SCRIPT_URL" 2>/dev/null)
+    
+    if [[ -z "$remote_content" ]]; then
+        echo -e "\033[31m无法连接到更新服务器\033[0m"
+        echo "请检查:"
+        echo "  1. 网络连接是否正常"
+        echo "  2. GitHub 地址是否正确"
+        echo "  3. 仓库是否为公开状态"
+        return 1
+    fi
+    
+    remote_ver=$(echo "$remote_content" | grep -m1 'SCRIPT_VERSION=' | cut -d'"' -f2)
     
     if [[ -z "$remote_ver" ]]; then
-        echo "无法获取远程版本"
+        echo -e "\033[31m无法解析远程版本\033[0m"
         return 1
     fi
     
@@ -49,23 +115,24 @@ update_script() {
     echo "最新版本: ${remote_ver}"
     
     if [[ "$SCRIPT_VERSION" == "$remote_ver" ]]; then
-        echo "已是最新版本"
+        echo -e "\033[32m已是最新版本\033[0m"
         return 0
     fi
     
+    echo ""
     echo "发现新版本，正在更新..."
-    curl -sL "$SCRIPT_URL" -o "$INSTALL_PATH" || {
-        echo "更新失败"
+    echo "$remote_content" > "$INSTALL_PATH" || {
+        echo -e "\033[31m更新失败\033[0m"
         return 1
     }
     chmod +x "$INSTALL_PATH"
-    echo "更新成功！请重新运行 vps"
+    echo -e "\033[32m更新成功！请重新运行 vps\033[0m"
     exit 0
 }
 
 uninstall_script() {
     echo "正在卸载..."
-    rm -f "$INSTALL_PATH"
+    rm -f "$INSTALL_PATH" 2>/dev/null
     echo "已卸载，感谢使用！"
     exit 0
 }
@@ -75,40 +142,26 @@ if [[ ! -f "$INSTALL_PATH" ]]; then
     install_script
 fi
 
-# 首先安装基础工具（在任何其他操作之前）
-# 检测几个关键命令是否存在
-_need_deps=0
-command -v awk >/dev/null 2>&1 || _need_deps=1
-command -v grep >/dev/null 2>&1 || _need_deps=1
-command -v sed >/dev/null 2>&1 || _need_deps=1
-command -v head >/dev/null 2>&1 || _need_deps=1
-command -v cat >/dev/null 2>&1 || _need_deps=1
-command -v tr >/dev/null 2>&1 || _need_deps=1
-command -v basename >/dev/null 2>&1 || _need_deps=1
-command -v mkdir >/dev/null 2>&1 || _need_deps=1
-command -v sleep >/dev/null 2>&1 || _need_deps=1
-command -v shuf >/dev/null 2>&1 || _need_deps=1
-command -v ss >/dev/null 2>&1 || _need_deps=1
-
-if [[ $_need_deps -eq 1 ]]; then
-    echo "检测到缺少基础命令，正在安装..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq 2>/dev/null
-        apt-get install -y coreutils gawk sed grep curl wget iproute2 ncurses-bin jq 2>/dev/null
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y coreutils gawk sed grep curl wget iproute ncurses jq 2>/dev/null
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y coreutils gawk sed grep curl wget iproute ncurses jq 2>/dev/null
+# 额外检查并安装可能缺少的工具
+_check_extra_deps() {
+    local missing=""
+    command -v jq >/dev/null 2>&1 || missing="$missing jq"
+    command -v ss >/dev/null 2>&1 || missing="$missing iproute2"
+    
+    if [[ -n "$missing" ]]; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get install -y $missing >/dev/null 2>&1
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y $missing >/dev/null 2>&1
+        fi
     fi
-    hash -r 2>/dev/null
-    echo "基础依赖安装完成"
-fi
-unset _need_deps
+}
+_check_extra_deps
 
-# 定义 clear 函数（如果仍然不存在）
-if ! command -v clear &>/dev/null; then
-    clear() { printf '\033[2J\033[H'; }
-fi
+# 定义 clear 函数（始终使用内置方式，避免命令找不到）
+clear() {
+    printf '\033[2J\033[H'
+}
 
 # ==================== 颜色定义 ====================
 RED='\033[0;31m'
@@ -641,7 +694,7 @@ install_bbr_v3() {
     
     rm -f /tmp/linux-*.deb
     for url in $urls; do
-        log_info "下载: $(basename $url)"
+        log_info "下载: ${url##*/}"
         wget -q --show-progress "$url" -P /tmp/ || { log_error "下载失败"; return 1; }
     done
     
@@ -1715,7 +1768,9 @@ check_singbox() {
         local count=0
         if [[ -d "${SINGBOX_INBOUNDS_DIR}" ]]; then
             for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
-                [[ -f "$f" && "$(basename "$f")" != "00_base.json" ]] && ((count++))
+                [[ -f "$f" ]] || continue
+                local fname="${f##*/}"  # 纯 bash 替代 basename
+                [[ "$fname" != "00_base.json" ]] && ((count++))
             done
         fi
         echo -e "Sing-box: ${GREEN}${ver:-未知}${NC} (${status}) - ${GREEN}${count}${NC} 个节点"
@@ -1785,7 +1840,7 @@ EOF
         local inbounds="[]"
         for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
             [[ -f "$f" ]] || continue
-            [[ "$(basename "$f")" == "00_base.json" ]] && continue
+            [[ "${f##*/}" == "00_base.json" ]] && continue
             # 从 {"inbounds": [...]} 格式中提取 inbounds 数组
             local file_inbounds=$(cat "$f" 2>/dev/null | jq -c '.inbounds // []')
             [[ -n "$file_inbounds" && "$file_inbounds" != "[]" ]] && inbounds=$(echo "$inbounds" | jq --argjson new "$file_inbounds" '. + $new')
@@ -1835,7 +1890,7 @@ remove_singbox_inbound() {
     local count=0
     if [[ -d "${SINGBOX_INBOUNDS_DIR}" ]]; then
         for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
-            [[ -f "$f" && "$(basename "$f")" != "00_base.json" ]] && ((count++))
+            [[ -f "$f" && "${f##*/}" != "00_base.json" ]] && ((count++))
         done
     fi
     if [[ $count -eq 0 ]]; then
@@ -2466,9 +2521,9 @@ uninstall_singbox_node() {
     if [[ "$choice" == "U" || "$choice" == "u" ]]; then
         if confirm "确认完全卸载 Sing-box？"; then
             service_stop sing-box
-            rm -f /etc/systemd/system/sing-box.service "$SINGBOX_BIN"
-            rm -rf "$SINGBOX_DIR"
-            systemctl daemon-reload
+            rm -f /etc/systemd/system/sing-box.service "$SINGBOX_BIN" 2>/dev/null
+            rm -rf "$SINGBOX_DIR" 2>/dev/null
+            systemctl daemon-reload 2>/dev/null
             log_success "Sing-box 已完全卸载"
         fi
         return
