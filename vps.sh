@@ -7,6 +7,9 @@
 # 版本: 1.0.0
 #
 
+# 确保基础命令可用
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 SCRIPT_VERSION="1.0.0"
 SCRIPT_NAME="VPS-Toolkit"
 
