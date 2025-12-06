@@ -7,19 +7,46 @@
 # 版本: 1.0.0
 #
 
-# 强制设置 PATH - 解决进程替换执行时的环境问题
-PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export PATH LANG=C.UTF-8
-
-# 定义 clear 函数（兼容没有 ncurses 的系统）
-if ! command -v clear &>/dev/null; then
-    clear() { printf '\033[2J\033[H'; }
-fi
+# 强制设置 PATH
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export LANG=C.UTF-8
 
 # 检查是否为 root
 if [[ $EUID -ne 0 ]]; then
     echo "请以 root 权限运行此脚本"
     exit 1
+fi
+
+# 检查基础工具，如果缺失则安装后重新执行
+check_and_install_base_tools() {
+    local need_install=0
+    command -v awk &>/dev/null || need_install=1
+    command -v sed &>/dev/null || need_install=1
+    command -v clear &>/dev/null || need_install=1
+    
+    if [[ $need_install -eq 1 ]]; then
+        echo "检测到缺少基础工具，正在安装..."
+        if command -v apt-get &>/dev/null; then
+            apt-get update -qq
+            apt-get install -y -qq gawk sed ncurses-bin coreutils >/dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y -q gawk sed ncurses coreutils >/dev/null 2>&1
+        fi
+        
+        # 安装后重新执行脚本
+        if [[ -f "$0" && "$0" != "/dev/fd/"* && "$0" != "bash" ]]; then
+            exec bash "$0" "$@"
+        else
+            echo "基础工具已安装，请重新运行脚本"
+            exit 0
+        fi
+    fi
+}
+check_and_install_base_tools
+
+# 定义 clear 函数（如果仍然不存在）
+if ! command -v clear &>/dev/null; then
+    clear() { printf '\033[2J\033[H'; }
 fi
 
 SCRIPT_VERSION="1.0.0"
