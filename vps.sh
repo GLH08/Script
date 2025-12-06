@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # VPS 一键管理工具箱
 # GitHub: https://github.com/your-username/vps-toolkit
@@ -7,8 +7,15 @@
 # 版本: 1.0.0
 #
 
-# 确保基础命令可用
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+# 强制设置 PATH - 解决进程替换执行时的环境问题
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH LANG=C.UTF-8
+
+# 检查是否为 root
+if [[ $EUID -ne 0 ]]; then
+    echo "请以 root 权限运行此脚本"
+    exit 1
+fi
 
 SCRIPT_VERSION="1.0.0"
 SCRIPT_NAME="VPS-Toolkit"
@@ -26,6 +33,16 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+
+# 生成在线二维码链接
+show_qrcode() {
+    local content=$1
+    # URL 编码
+    local encoded=$(echo -n "$content" | sed 's/:/%3A/g; s/\//%2F/g; s/?/%3F/g; s/=/%3D/g; s/&/%26/g; s/@/%40/g; s/#/%23/g; s/ /%20/g')
+    local qr_url="https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encoded}"
+    echo -e "${YELLOW}【在线二维码】${NC}"
+    echo -e "${GREEN}${qr_url}${NC}"
+}
 
 print_line() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1316,7 +1333,7 @@ show_ss2022_config() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$surge" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$surge"
 }
 
 ss2022_menu() {
@@ -1589,14 +1606,14 @@ add_singbox_inbound() {
 # 删除单个 inbound 配置
 remove_singbox_inbound() {
     local name=$1
-    rm -f "${SINGBOX_INBOUNDS_DIR}/${name}.json"
-    rm -f "${SINGBOX_DIR}/${name}.conf"
+    rm -f "${SINGBOX_INBOUNDS_DIR}/${name}.json" 2>/dev/null
+    rm -f "${SINGBOX_DIR}/${name}.conf" 2>/dev/null
     
     # 检查是否还有其他节点
-    local count=$(ls "${SINGBOX_INBOUNDS_DIR}"/*.json 2>/dev/null | wc -l)
+    local count=$(find "${SINGBOX_INBOUNDS_DIR}" -name "*.json" 2>/dev/null | wc -l)
     if [[ $count -eq 0 ]]; then
         service_stop sing-box
-        rm -f "$SINGBOX_CONF"
+        rm -f "$SINGBOX_CONF" 2>/dev/null
     else
         rebuild_singbox_config
         service_restart sing-box
@@ -1677,7 +1694,7 @@ show_vless_reality() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$link"
 }
 
 install_hysteria2() {
@@ -1803,7 +1820,7 @@ show_vmess_ws() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$link"
 }
 
 install_vless_ws() {
@@ -1880,7 +1897,7 @@ show_vless_ws() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$link"
 }
 
 install_trojan_ws() {
@@ -1956,7 +1973,7 @@ show_trojan_ws() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$link"
 }
 
 install_trojan_http() {
@@ -2033,7 +2050,7 @@ show_trojan_http() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$link"
 }
 
 install_tuic() {
@@ -2107,7 +2124,7 @@ show_tuic() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$link"
 }
 
 show_hysteria2() {
@@ -2133,7 +2150,7 @@ show_hysteria2() {
     echo -e "${CYAN}${loon}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
+    show_qrcode "$link"
 }
 
 show_all_singbox_nodes() {
