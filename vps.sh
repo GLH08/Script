@@ -147,7 +147,13 @@ get_available_port() {
 }
 
 get_ipv4() {
-    curl -s4m5 icanhazip.com 2>/dev/null || curl -s4m5 ipinfo.io/ip 2>/dev/null
+    local ip=""
+    ip=$(curl -s4m8 icanhazip.com 2>/dev/null)
+    [[ -z "$ip" ]] && ip=$(curl -s4m8 ipinfo.io/ip 2>/dev/null)
+    [[ -z "$ip" ]] && ip=$(curl -s4m8 api.ipify.org 2>/dev/null)
+    [[ -z "$ip" ]] && ip=$(curl -s4m8 ifconfig.me 2>/dev/null)
+    [[ -z "$ip" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    echo "$ip"
 }
 
 get_ipv6() {
@@ -1130,12 +1136,14 @@ show_snell_config() {
     echo -e "  版本:   ${GREEN}v${ver}${NC}"
     print_line
     
-    local config="Snell = snell, ${ip}, ${port}, psk=${psk}, version=${ver}, tfo=true"
-    echo -e "${YELLOW}【Surge/Loon 配置】${NC}"
-    echo -e "${CYAN}${config}${NC}"
+    local surge="Snell = snell, ${ip}, ${port}, psk=${psk}, version=${ver}, tfo=true"
+    echo -e "${YELLOW}【Surge 配置】${NC}"
+    echo -e "${CYAN}${surge}${NC}"
     print_line
     
-    command -v qrencode &>/dev/null && echo "$config" | qrencode -o - -t ANSIUTF8
+    local loon="Snell = Snell,${ip},${port},psk=${psk},version=${ver},tfo=true"
+    echo -e "${YELLOW}【Loon 配置】${NC}"
+    echo -e "${CYAN}${loon}${NC}"
     print_line
 }
 
@@ -1345,15 +1353,152 @@ ss2022_menu() {
     done
 }
 
+# ==================== 证书管理模块 ====================
+CERT_DIR="/etc/ssl/private"
+ACME_HOME="$HOME/.acme.sh"
+
+install_acme() {
+    if [[ ! -f "$ACME_HOME/acme.sh" ]]; then
+        log_info "安装 acme.sh..."
+        curl -sL https://get.acme.sh | sh -s email=admin@example.com
+        source "$ACME_HOME/acme.sh.env" 2>/dev/null
+    fi
+}
+
+# 申请证书 - 支持 Cloudflare DNS 验证
+apply_cert_cf() {
+    local domain=$1
+    
+    install_acme
+    mkdir -p "$CERT_DIR"
+    
+    echo -e "${YELLOW}使用 Cloudflare DNS 验证申请证书${NC}"
+    echo -e "请准备 Cloudflare API Token (需要 Zone:DNS:Edit 权限)"
+    echo
+    
+    read -r -p "Cloudflare API Token: " cf_token
+    [[ -z "$cf_token" ]] && { log_error "Token 不能为空"; return 1; }
+    
+    export CF_Token="$cf_token"
+    
+    log_info "申请证书: ${domain}..."
+    "$ACME_HOME/acme.sh" --issue --dns dns_cf -d "$domain" --keylength ec-256 --force
+    
+    if [[ $? -eq 0 ]]; then
+        "$ACME_HOME/acme.sh" --install-cert -d "$domain" --ecc \
+            --key-file "${CERT_DIR}/${domain}.key" \
+            --fullchain-file "${CERT_DIR}/${domain}.crt"
+        log_success "证书申请成功"
+        return 0
+    else
+        log_error "证书申请失败"
+        return 1
+    fi
+}
+
+# 申请证书 - HTTP 验证 (需要80端口)
+apply_cert_http() {
+    local domain=$1
+    
+    install_acme
+    mkdir -p "$CERT_DIR"
+    
+    # 检查80端口
+    if ss -tlnp | grep -q ":80 "; then
+        log_warn "80 端口被占用，请先停止占用服务"
+        return 1
+    fi
+    
+    log_info "申请证书: ${domain}..."
+    "$ACME_HOME/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 --force
+    
+    if [[ $? -eq 0 ]]; then
+        "$ACME_HOME/acme.sh" --install-cert -d "$domain" --ecc \
+            --key-file "${CERT_DIR}/${domain}.key" \
+            --fullchain-file "${CERT_DIR}/${domain}.crt"
+        log_success "证书申请成功"
+        return 0
+    else
+        log_error "证书申请失败"
+        return 1
+    fi
+}
+
+# 选择证书模式
+select_tls_mode() {
+    local domain_var=$1
+    local cert_path_var=$2
+    local key_path_var=$3
+    local skip_verify_var=$4
+    
+    echo
+    echo -e "${YELLOW}【TLS 证书模式】${NC}"
+    print_menu_item "1" "自签证书 (快速，需跳过验证)"
+    print_menu_item "2" "真实域名 + Cloudflare DNS 验证 (推荐套CDN)"
+    print_menu_item "3" "真实域名 + HTTP 验证 (需80端口)"
+    print_line
+    
+    read -r -p "请选择 [1-3]: " tls_mode
+    
+    case $tls_mode in
+        1)
+            read -r -p "伪装域名 (默认 www.bing.com): " domain
+            domain=${domain:-www.bing.com}
+            
+            openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
+            openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+            
+            eval "$domain_var='$domain'"
+            eval "$cert_path_var='${SINGBOX_DIR}/cert.pem'"
+            eval "$key_path_var='${SINGBOX_DIR}/key.pem'"
+            eval "$skip_verify_var='true'"
+            ;;
+        2)
+            read -r -p "你的域名 (如 example.com): " domain
+            [[ -z "$domain" ]] && { log_error "域名不能为空"; return 1; }
+            
+            if apply_cert_cf "$domain"; then
+                eval "$domain_var='$domain'"
+                eval "$cert_path_var='${CERT_DIR}/${domain}.crt'"
+                eval "$key_path_var='${CERT_DIR}/${domain}.key'"
+                eval "$skip_verify_var='false'"
+            else
+                return 1
+            fi
+            ;;
+        3)
+            read -r -p "你的域名 (需解析到本机IP): " domain
+            [[ -z "$domain" ]] && { log_error "域名不能为空"; return 1; }
+            
+            if apply_cert_http "$domain"; then
+                eval "$domain_var='$domain'"
+                eval "$cert_path_var='${CERT_DIR}/${domain}.crt'"
+                eval "$key_path_var='${CERT_DIR}/${domain}.key'"
+                eval "$skip_verify_var='false'"
+            else
+                return 1
+            fi
+            ;;
+        *)
+            log_error "无效选择"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 # ==================== Sing-box 模块 ====================
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_DIR="/etc/sing-box"
 SINGBOX_CONF="${SINGBOX_DIR}/config.json"
+SINGBOX_INBOUNDS_DIR="${SINGBOX_DIR}/inbounds"
 
 check_singbox() {
     if [[ -f "$SINGBOX_BIN" ]]; then
         local ver=$($SINGBOX_BIN version 2>/dev/null | head -1 | awk '{print $NF}')
-        echo -e "Sing-box: ${GREEN}${ver:-未知}${NC} ($(service_status sing-box))"
+        local status=$(service_status sing-box)
+        local count=$(ls "${SINGBOX_INBOUNDS_DIR}"/*.json 2>/dev/null | wc -l)
+        echo -e "Sing-box: ${GREEN}${ver:-未知}${NC} (${status}) - ${GREEN}${count}${NC} 个节点"
         return 0
     else
         echo -e "Sing-box: ${RED}未安装${NC}"
@@ -1379,7 +1524,7 @@ install_singbox_core() {
     wget -q --show-progress "$url" -O singbox.tar.gz || { log_error "下载失败"; return 1; }
     tar -xzf singbox.tar.gz && mv sing-box-*/sing-box "$SINGBOX_BIN" && chmod +x "$SINGBOX_BIN"
     rm -rf singbox.tar.gz sing-box-*
-    mkdir -p "$SINGBOX_DIR"
+    mkdir -p "$SINGBOX_DIR" "$SINGBOX_INBOUNDS_DIR"
     
     cat > /etc/systemd/system/sing-box.service << 'EOF'
 [Unit]
@@ -1396,6 +1541,65 @@ EOF
     log_success "Sing-box 核心安装完成"
 }
 
+# 重新生成 config.json（合并所有 inbound）
+rebuild_singbox_config() {
+    ensure_cmd jq jq
+    mkdir -p "$SINGBOX_INBOUNDS_DIR"
+    
+    # 收集所有 inbound 配置
+    local inbounds="[]"
+    for f in "${SINGBOX_INBOUNDS_DIR}"/*.json; do
+        [[ -f "$f" ]] || continue
+        local inbound=$(cat "$f")
+        inbounds=$(echo "$inbounds" | jq --argjson new "$inbound" '. + [$new]')
+    done
+    
+    # 生成完整配置
+    cat > "$SINGBOX_CONF" << EOF
+{
+  "log": {"level": "info"},
+  "inbounds": ${inbounds},
+  "outbounds": [{"type": "direct", "tag": "direct"}]
+}
+EOF
+    
+    # 验证配置
+    if $SINGBOX_BIN check -c "$SINGBOX_CONF" 2>/dev/null; then
+        return 0
+    else
+        log_error "配置验证失败"
+        return 1
+    fi
+}
+
+# 添加单个 inbound 配置
+add_singbox_inbound() {
+    local name=$1
+    local inbound_json=$2
+    
+    mkdir -p "$SINGBOX_INBOUNDS_DIR"
+    echo "$inbound_json" > "${SINGBOX_INBOUNDS_DIR}/${name}.json"
+    
+    rebuild_singbox_config
+}
+
+# 删除单个 inbound 配置
+remove_singbox_inbound() {
+    local name=$1
+    rm -f "${SINGBOX_INBOUNDS_DIR}/${name}.json"
+    rm -f "${SINGBOX_DIR}/${name}.conf"
+    
+    # 检查是否还有其他节点
+    local count=$(ls "${SINGBOX_INBOUNDS_DIR}"/*.json 2>/dev/null | wc -l)
+    if [[ $count -eq 0 ]]; then
+        service_stop sing-box
+        rm -f "$SINGBOX_CONF"
+    else
+        rebuild_singbox_config
+        service_restart sing-box
+    fi
+}
+
 install_vless_reality() {
     clear
     print_line
@@ -1403,6 +1607,12 @@ install_vless_reality() {
     print_line
     
     [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    
+    # 检查是否已安装同类型节点
+    if [[ -f "${SINGBOX_DIR}/reality.conf" ]]; then
+        log_warn "VLESS Reality 已安装"
+        confirm "是否重新安装？" || return
+    fi
     
     local port uuid sni
     read -r -p "端口 (默认随机): " port; port=${port:-$(get_available_port)}
@@ -1414,10 +1624,14 @@ install_vless_reality() {
     local public_key=$(echo "$keys" | grep "PublicKey" | awk '{print $2}')
     local short_id=$(random_hex 8)
     
-    cat > "$SINGBOX_CONF" << EOF
-{"log":{"level":"info"},"inbounds":[{"type":"vless","tag":"vless-reality","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"${sni}","reality":{"enabled":true,"handshake":{"server":"${sni}","server_port":443},"private_key":"${private_key}","short_id":["${short_id}"]}}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+    # 保存 inbound 配置
+    local inbound_json=$(cat << EOF
+{"type":"vless","tag":"vless-reality","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"${sni}","reality":{"enabled":true,"handshake":{"server":"${sni}","server_port":443},"private_key":"${private_key}","short_id":["${short_id}"]}}}
 EOF
+)
+    add_singbox_inbound "reality" "$inbound_json"
     
+    # 保存节点参数
     cat > "${SINGBOX_DIR}/reality.conf" << EOF
 PORT=${port}
 UUID=${uuid}
@@ -1427,7 +1641,7 @@ SHORT_ID=${short_id}
 EOF
     
     service_enable sing-box
-    service_start sing-box
+    service_restart sing-box
     firewall_allow_port "$port" tcp
     
     sleep 2
@@ -1455,7 +1669,7 @@ show_vless_reality() {
     echo -e "${CYAN}${link}${NC}"
     print_line
     
-    local loon="VLESS-Reality = VLESS,${ip},${PORT},\"${UUID}\",transport=tcp,flow=xtls-rprx-vision,over-tls=true,sni=${SNI},skip-cert-verify=true,public-key=\"${PUBLIC_KEY}\",short-id=${SHORT_ID},udp=true"
+    local loon="VLESS-Reality = VLESS,${ip},${PORT},\"${UUID}\",transport=tcp,flow=xtls-rprx-vision,public-key=\"${PUBLIC_KEY}\",short-id=${SHORT_ID},udp=true,block-quic=true,over-tls=true,sni=${SNI}"
     echo -e "${YELLOW}【Loon 配置】${NC}"
     echo -e "${CYAN}${loon}${NC}"
     print_line
@@ -1471,6 +1685,11 @@ install_hysteria2() {
     
     [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
     
+    if [[ -f "${SINGBOX_DIR}/hysteria2.conf" ]]; then
+        log_warn "Hysteria2 已安装"
+        confirm "是否重新安装？" || return
+    fi
+    
     ensure_cmd openssl openssl
     
     local port password domain
@@ -1478,13 +1697,17 @@ install_hysteria2() {
     read -r -p "密码 (默认随机): " password; password=${password:-$(random_string 16)}
     domain="www.bing.com"
     
-    # 自签证书
-    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
-    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    # 自签证书（每个协议独立证书）
+    local cert_file="${SINGBOX_DIR}/hy2_cert.pem"
+    local key_file="${SINGBOX_DIR}/hy2_key.pem"
+    openssl ecparam -genkey -name prime256v1 -out "$key_file" 2>/dev/null
+    openssl req -new -x509 -days 36500 -key "$key_file" -out "$cert_file" -subj "/CN=${domain}" 2>/dev/null
     
-    cat > "$SINGBOX_CONF" << EOF
-{"log":{"level":"info"},"inbounds":[{"type":"hysteria2","tag":"hy2","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"tls":{"enabled":true,"alpn":["h3"],"certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+    local inbound_json=$(cat << EOF
+{"type":"hysteria2","tag":"hy2","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"tls":{"enabled":true,"alpn":["h3"],"certificate_path":"${cert_file}","key_path":"${key_file}"}}
 EOF
+)
+    add_singbox_inbound "hysteria2" "$inbound_json"
     
     cat > "${SINGBOX_DIR}/hysteria2.conf" << EOF
 PORT=${port}
@@ -1508,27 +1731,34 @@ install_vmess_ws() {
     print_line
     
     [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    
+    if [[ -f "${SINGBOX_DIR}/vmess-ws.conf" ]]; then
+        log_warn "VMess WS 已安装"
+        confirm "是否重新安装？" || return
+    fi
+    
     ensure_cmd openssl openssl
     
-    local port uuid path domain
+    local port uuid path domain cert_path key_path skip_verify
     read -r -p "端口 (默认443): " port; port=${port:-443}
     read -r -p "UUID (默认随机): " uuid; uuid=${uuid:-$($SINGBOX_BIN generate uuid)}
     read -r -p "WS路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
-    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
     
-    # 自签证书
-    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
-    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    # 选择证书模式
+    select_tls_mode domain cert_path key_path skip_verify || return 1
     
-    cat > "$SINGBOX_CONF" << EOF
-{"log":{"level":"info"},"inbounds":[{"type":"vmess","tag":"vmess-ws","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+    local inbound_json=$(cat << EOF
+{"type":"vmess","tag":"vmess-ws","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${cert_path}","key_path":"${key_path}"}}
 EOF
+)
+    add_singbox_inbound "vmess-ws" "$inbound_json"
     
     cat > "${SINGBOX_DIR}/vmess-ws.conf" << EOF
 PORT=${port}
 UUID=${uuid}
 PATH=${path}
 DOMAIN=${domain}
+SKIP_VERIFY=${skip_verify}
 EOF
     
     service_enable sing-box
@@ -1544,6 +1774,7 @@ show_vmess_ws() {
     [[ ! -f "${SINGBOX_DIR}/vmess-ws.conf" ]] && { log_error "未安装"; return; }
     source "${SINGBOX_DIR}/vmess-ws.conf"
     local ip=$(get_ipv4)
+    local skip_verify_val=${SKIP_VERIFY:-true}
     
     print_line
     echo -e "${YELLOW}【VMess + WS + TLS 节点】${NC}"
@@ -1551,13 +1782,22 @@ show_vmess_ws() {
     echo -e "  端口:   ${GREEN}${PORT}${NC}"
     echo -e "  UUID:   ${GREEN}${UUID}${NC}"
     echo -e "  路径:   ${GREEN}${PATH}${NC}"
-    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    echo -e "  域名:   ${GREEN}${DOMAIN}${NC}"
+    echo -e "  证书:   ${GREEN}$([[ "$skip_verify_val" == "true" ]] && echo "自签" || echo "真实")${NC}"
     print_line
     
-    local vmess_json="{\"v\":\"2\",\"ps\":\"VMess-WS\",\"add\":\"${ip}\",\"port\":\"${PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+    # 如果是真实证书，使用域名作为地址；否则使用IP
+    local addr=$([[ "$skip_verify_val" == "false" ]] && echo "$DOMAIN" || echo "$ip")
+    
+    local vmess_json="{\"v\":\"2\",\"ps\":\"VMess-WS\",\"add\":\"${addr}\",\"port\":\"${PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
     local link="vmess://$(echo -n "$vmess_json" | base64 -w 0)"
     echo -e "${YELLOW}【分享链接】${NC}"
     echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    local loon="VMess-WS = vmess,${addr},${PORT},aes-128-gcm,\"${UUID}\",transport=ws,path=${PATH},host=${DOMAIN},over-tls=true,sni=${DOMAIN},skip-cert-verify=${skip_verify_val}"
+    echo -e "${YELLOW}【Loon 配置】${NC}"
+    echo -e "${CYAN}${loon}${NC}"
     print_line
     
     command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
@@ -1570,26 +1810,34 @@ install_vless_ws() {
     print_line
     
     [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    
+    if [[ -f "${SINGBOX_DIR}/vless-ws.conf" ]]; then
+        log_warn "VLESS WS 已安装"
+        confirm "是否重新安装？" || return
+    fi
+    
     ensure_cmd openssl openssl
     
-    local port uuid path domain
+    local port uuid path domain cert_path key_path skip_verify
     read -r -p "端口 (默认443): " port; port=${port:-443}
     read -r -p "UUID (默认随机): " uuid; uuid=${uuid:-$($SINGBOX_BIN generate uuid)}
     read -r -p "WS路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
-    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
     
-    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
-    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    # 选择证书模式
+    select_tls_mode domain cert_path key_path skip_verify || return 1
     
-    cat > "$SINGBOX_CONF" << EOF
-{"log":{"level":"info"},"inbounds":[{"type":"vless","tag":"vless-ws","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+    local inbound_json=$(cat << EOF
+{"type":"vless","tag":"vless-ws","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${cert_path}","key_path":"${key_path}"}}
 EOF
+)
+    add_singbox_inbound "vless-ws" "$inbound_json"
     
     cat > "${SINGBOX_DIR}/vless-ws.conf" << EOF
 PORT=${port}
 UUID=${uuid}
 PATH=${path}
 DOMAIN=${domain}
+SKIP_VERIFY=${skip_verify}
 EOF
     
     service_enable sing-box
@@ -1605,6 +1853,7 @@ show_vless_ws() {
     [[ ! -f "${SINGBOX_DIR}/vless-ws.conf" ]] && { log_error "未安装"; return; }
     source "${SINGBOX_DIR}/vless-ws.conf"
     local ip=$(get_ipv4)
+    local skip_verify_val=${SKIP_VERIFY:-true}
     
     print_line
     echo -e "${YELLOW}【VLESS + WS + TLS 节点】${NC}"
@@ -1612,12 +1861,20 @@ show_vless_ws() {
     echo -e "  端口:   ${GREEN}${PORT}${NC}"
     echo -e "  UUID:   ${GREEN}${UUID}${NC}"
     echo -e "  路径:   ${GREEN}${PATH}${NC}"
-    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    echo -e "  域名:   ${GREEN}${DOMAIN}${NC}"
+    echo -e "  证书:   ${GREEN}$([[ "$skip_verify_val" == "true" ]] && echo "自签" || echo "真实")${NC}"
     print_line
     
-    local link="vless://${UUID}@${ip}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${PATH}#VLESS-WS"
+    local addr=$([[ "$skip_verify_val" == "false" ]] && echo "$DOMAIN" || echo "$ip")
+    
+    local link="vless://${UUID}@${addr}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${PATH}#VLESS-WS"
     echo -e "${YELLOW}【分享链接】${NC}"
     echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    local loon="VLESS-WS = VLESS,${addr},${PORT},\"${UUID}\",transport=ws,path=${PATH},host=${DOMAIN},over-tls=true,sni=${DOMAIN},skip-cert-verify=${skip_verify_val}"
+    echo -e "${YELLOW}【Loon 配置】${NC}"
+    echo -e "${CYAN}${loon}${NC}"
     print_line
     
     command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
@@ -1630,26 +1887,33 @@ install_trojan_ws() {
     print_line
     
     [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    if [[ -f "${SINGBOX_DIR}/trojan-ws.conf" ]]; then
+        log_warn "Trojan WS 已安装"
+        confirm "是否重新安装？" || return
+    fi
+    
     ensure_cmd openssl openssl
     
-    local port password path domain
+    local port password path domain cert_path key_path skip_verify
     read -r -p "端口 (默认443): " port; port=${port:-443}
     read -r -p "密码 (默认随机): " password; password=${password:-$(random_string 16)}
     read -r -p "WS路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
-    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
     
-    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
-    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    # 选择证书模式
+    select_tls_mode domain cert_path key_path skip_verify || return 1
     
-    cat > "$SINGBOX_CONF" << EOF
-{"log":{"level":"info"},"inbounds":[{"type":"trojan","tag":"trojan-ws","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+    local inbound_json=$(cat << EOF
+{"type":"trojan","tag":"trojan-ws","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"transport":{"type":"ws","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${cert_path}","key_path":"${key_path}"}}
 EOF
+)
+    add_singbox_inbound "trojan-ws" "$inbound_json"
     
     cat > "${SINGBOX_DIR}/trojan-ws.conf" << EOF
 PORT=${port}
 PASSWORD=${password}
 PATH=${path}
 DOMAIN=${domain}
+SKIP_VERIFY=${skip_verify}
 EOF
     
     service_enable sing-box
@@ -1665,6 +1929,7 @@ show_trojan_ws() {
     [[ ! -f "${SINGBOX_DIR}/trojan-ws.conf" ]] && { log_error "未安装"; return; }
     source "${SINGBOX_DIR}/trojan-ws.conf"
     local ip=$(get_ipv4)
+    local skip_verify_val=${SKIP_VERIFY:-true}
     
     print_line
     echo -e "${YELLOW}【Trojan + WS + TLS 节点】${NC}"
@@ -1672,12 +1937,20 @@ show_trojan_ws() {
     echo -e "  端口:   ${GREEN}${PORT}${NC}"
     echo -e "  密码:   ${GREEN}${PASSWORD}${NC}"
     echo -e "  路径:   ${GREEN}${PATH}${NC}"
-    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    echo -e "  域名:   ${GREEN}${DOMAIN}${NC}"
+    echo -e "  证书:   ${GREEN}$([[ "$skip_verify_val" == "true" ]] && echo "自签" || echo "真实")${NC}"
     print_line
     
-    local link="trojan://${PASSWORD}@${ip}:${PORT}?security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${PATH}#Trojan-WS"
+    local addr=$([[ "$skip_verify_val" == "false" ]] && echo "$DOMAIN" || echo "$ip")
+    
+    local link="trojan://${PASSWORD}@${addr}:${PORT}?security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${PATH}#Trojan-WS"
     echo -e "${YELLOW}【分享链接】${NC}"
     echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    local loon="Trojan-WS = Trojan,${addr},${PORT},\"${PASSWORD}\",transport=ws,path=${PATH},host=${DOMAIN},over-tls=true,sni=${DOMAIN},skip-cert-verify=${skip_verify_val}"
+    echo -e "${YELLOW}【Loon 配置】${NC}"
+    echo -e "${CYAN}${loon}${NC}"
     print_line
     
     command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
@@ -1690,26 +1963,34 @@ install_trojan_http() {
     print_line
     
     [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    
+    if [[ -f "${SINGBOX_DIR}/trojan-http.conf" ]]; then
+        log_warn "Trojan HTTP 已安装"
+        confirm "是否重新安装？" || return
+    fi
+    
     ensure_cmd openssl openssl
     
-    local port password path domain
+    local port password path domain cert_path key_path skip_verify
     read -r -p "端口 (默认443): " port; port=${port:-443}
     read -r -p "密码 (默认随机): " password; password=${password:-$(random_string 16)}
     read -r -p "HTTP路径 (默认随机): " path; path=${path:-"/$(random_string 8)"}
-    read -r -p "伪装域名 (默认 www.bing.com): " domain; domain=${domain:-www.bing.com}
     
-    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
-    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    # 选择证书模式
+    select_tls_mode domain cert_path key_path skip_verify || return 1
     
-    cat > "$SINGBOX_CONF" << EOF
-{"log":{"level":"info"},"inbounds":[{"type":"trojan","tag":"trojan-http","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"transport":{"type":"http","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+    local inbound_json=$(cat << EOF
+{"type":"trojan","tag":"trojan-http","listen":"::","listen_port":${port},"users":[{"password":"${password}"}],"transport":{"type":"http","path":"${path}"},"tls":{"enabled":true,"server_name":"${domain}","certificate_path":"${cert_path}","key_path":"${key_path}"}}
 EOF
+)
+    add_singbox_inbound "trojan-http" "$inbound_json"
     
     cat > "${SINGBOX_DIR}/trojan-http.conf" << EOF
 PORT=${port}
 PASSWORD=${password}
 PATH=${path}
 DOMAIN=${domain}
+SKIP_VERIFY=${skip_verify}
 EOF
     
     service_enable sing-box
@@ -1725,6 +2006,7 @@ show_trojan_http() {
     [[ ! -f "${SINGBOX_DIR}/trojan-http.conf" ]] && { log_error "未安装"; return; }
     source "${SINGBOX_DIR}/trojan-http.conf"
     local ip=$(get_ipv4)
+    local skip_verify_val=${SKIP_VERIFY:-true}
     
     print_line
     echo -e "${YELLOW}【Trojan + HTTP + TLS 节点】${NC}"
@@ -1732,12 +2014,20 @@ show_trojan_http() {
     echo -e "  端口:   ${GREEN}${PORT}${NC}"
     echo -e "  密码:   ${GREEN}${PASSWORD}${NC}"
     echo -e "  路径:   ${GREEN}${PATH}${NC}"
-    echo -e "  SNI:    ${GREEN}${DOMAIN}${NC}"
+    echo -e "  域名:   ${GREEN}${DOMAIN}${NC}"
+    echo -e "  证书:   ${GREEN}$([[ "$skip_verify_val" == "true" ]] && echo "自签" || echo "真实")${NC}"
     print_line
     
-    local link="trojan://${PASSWORD}@${ip}:${PORT}?security=tls&sni=${DOMAIN}&type=http&host=${DOMAIN}&path=${PATH}#Trojan-HTTP"
+    local addr=$([[ "$skip_verify_val" == "false" ]] && echo "$DOMAIN" || echo "$ip")
+    
+    local link="trojan://${PASSWORD}@${addr}:${PORT}?security=tls&sni=${DOMAIN}&type=http&host=${DOMAIN}&path=${PATH}#Trojan-HTTP"
     echo -e "${YELLOW}【分享链接】${NC}"
     echo -e "${CYAN}${link}${NC}"
+    print_line
+    
+    local loon="Trojan-HTTP = Trojan,${addr},${PORT},\"${PASSWORD}\",transport=http,path=${PATH},host=${DOMAIN},over-tls=true,sni=${DOMAIN},skip-cert-verify=${skip_verify_val}"
+    echo -e "${YELLOW}【Loon 配置】${NC}"
+    echo -e "${CYAN}${loon}${NC}"
     print_line
     
     command -v qrencode &>/dev/null && echo "$link" | qrencode -o - -t ANSIUTF8
@@ -1750,6 +2040,12 @@ install_tuic() {
     print_line
     
     [[ ! -f "$SINGBOX_BIN" ]] && install_singbox_core
+    
+    if [[ -f "${SINGBOX_DIR}/tuic.conf" ]]; then
+        log_warn "TUIC 已安装"
+        confirm "是否重新安装？" || return
+    fi
+    
     ensure_cmd openssl openssl
     
     local port uuid password domain
@@ -1758,12 +2054,16 @@ install_tuic() {
     read -r -p "密码 (默认随机): " password; password=${password:-$(random_string 16)}
     domain="www.bing.com"
     
-    openssl ecparam -genkey -name prime256v1 -out "${SINGBOX_DIR}/key.pem" 2>/dev/null
-    openssl req -new -x509 -days 36500 -key "${SINGBOX_DIR}/key.pem" -out "${SINGBOX_DIR}/cert.pem" -subj "/CN=${domain}" 2>/dev/null
+    local cert_file="${SINGBOX_DIR}/tuic_cert.pem"
+    local key_file="${SINGBOX_DIR}/tuic_key.pem"
+    openssl ecparam -genkey -name prime256v1 -out "$key_file" 2>/dev/null
+    openssl req -new -x509 -days 36500 -key "$key_file" -out "$cert_file" -subj "/CN=${domain}" 2>/dev/null
     
-    cat > "$SINGBOX_CONF" << EOF
-{"log":{"level":"info"},"inbounds":[{"type":"tuic","tag":"tuic","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}","password":"${password}"}],"congestion_control":"bbr","tls":{"enabled":true,"alpn":["h3"],"certificate_path":"${SINGBOX_DIR}/cert.pem","key_path":"${SINGBOX_DIR}/key.pem"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+    local inbound_json=$(cat << EOF
+{"type":"tuic","tag":"tuic","listen":"::","listen_port":${port},"users":[{"uuid":"${uuid}","password":"${password}"}],"congestion_control":"bbr","tls":{"enabled":true,"alpn":["h3"],"certificate_path":"${cert_file}","key_path":"${key_file}"}}
 EOF
+)
+    add_singbox_inbound "tuic" "$inbound_json"
     
     cat > "${SINGBOX_DIR}/tuic.conf" << EOF
 PORT=${port}
@@ -1851,6 +2151,92 @@ show_all_singbox_nodes() {
     [[ $found -eq 0 ]] && log_warn "未安装任何节点"
 }
 
+# 删除 Sing-box 节点
+uninstall_singbox_node() {
+    clear
+    print_line
+    echo -e "${CYAN}        删除 Sing-box 节点${NC}"
+    print_line
+    
+    if [[ ! -f "$SINGBOX_BIN" ]]; then
+        log_warn "Sing-box 未安装"
+        return
+    fi
+    
+    # 列出已安装的节点
+    local nodes=()
+    local names=()
+    
+    [[ -f "${SINGBOX_DIR}/reality.conf" ]] && { nodes+=("reality"); names+=("VLESS + Reality"); }
+    [[ -f "${SINGBOX_DIR}/vmess-ws.conf" ]] && { nodes+=("vmess-ws"); names+=("VMess + WS + TLS"); }
+    [[ -f "${SINGBOX_DIR}/vless-ws.conf" ]] && { nodes+=("vless-ws"); names+=("VLESS + WS + TLS"); }
+    [[ -f "${SINGBOX_DIR}/trojan-ws.conf" ]] && { nodes+=("trojan-ws"); names+=("Trojan + WS + TLS"); }
+    [[ -f "${SINGBOX_DIR}/trojan-http.conf" ]] && { nodes+=("trojan-http"); names+=("Trojan + HTTP + TLS"); }
+    [[ -f "${SINGBOX_DIR}/hysteria2.conf" ]] && { nodes+=("hysteria2"); names+=("Hysteria2"); }
+    [[ -f "${SINGBOX_DIR}/tuic.conf" ]] && { nodes+=("tuic"); names+=("TUIC"); }
+    
+    if [[ ${#nodes[@]} -eq 0 ]]; then
+        echo -e "已安装节点: ${YELLOW}无${NC}"
+        echo
+        if confirm "是否卸载 Sing-box 核心？"; then
+            service_stop sing-box
+            rm -f /etc/systemd/system/sing-box.service "$SINGBOX_BIN"
+            rm -rf "$SINGBOX_DIR"
+            systemctl daemon-reload
+            log_success "Sing-box 已卸载"
+        fi
+        return
+    fi
+    
+    echo -e "${YELLOW}已安装的节点 (${#nodes[@]} 个):${NC}"
+    for i in "${!nodes[@]}"; do
+        print_menu_item "$((i+1))" "${names[$i]}"
+    done
+    print_line
+    print_menu_item "A" "删除全部节点"
+    print_menu_item "U" "完全卸载 Sing-box"
+    print_menu_item "0" "返回"
+    print_line
+    
+    read -r -p "请选择: " choice
+    
+    [[ "$choice" == "0" ]] && return
+    
+    if [[ "$choice" == "A" || "$choice" == "a" ]]; then
+        if confirm "确认删除全部节点？"; then
+            for node in "${nodes[@]}"; do
+                remove_singbox_inbound "$node"
+            done
+            log_success "已删除全部节点"
+        fi
+        return
+    fi
+    
+    if [[ "$choice" == "U" || "$choice" == "u" ]]; then
+        if confirm "确认完全卸载 Sing-box？"; then
+            service_stop sing-box
+            rm -f /etc/systemd/system/sing-box.service "$SINGBOX_BIN"
+            rm -rf "$SINGBOX_DIR"
+            systemctl daemon-reload
+            log_success "Sing-box 已完全卸载"
+        fi
+        return
+    fi
+    
+    # 删除单个节点
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -le ${#nodes[@]} ]]; then
+        local node_type="${nodes[$((choice-1))]}"
+        local node_name="${names[$((choice-1))]}"
+        
+        if confirm "确认删除 ${node_name}？"; then
+            remove_singbox_inbound "$node_type"
+            log_success "${node_name} 已删除"
+        fi
+    else
+        log_error "无效选择"
+    fi
+}
+
 singbox_menu() {
     while true; do
         clear
@@ -1871,8 +2257,8 @@ singbox_menu() {
         print_menu_item "7" "TUIC"
         print_line
         print_menu_item "8" "查看节点信息"
-        print_menu_item "9" "重启服务"
-        print_menu_item "10" "卸载"
+        print_menu_item "9" "删除节点"
+        print_menu_item "10" "重启服务"
         print_line
         print_menu_item "0" "返回"
         print_line
@@ -1887,17 +2273,8 @@ singbox_menu() {
             6) install_hysteria2; press_any_key ;;
             7) install_tuic; press_any_key ;;
             8) show_all_singbox_nodes; press_any_key ;;
-            9) service_restart sing-box; log_success "已重启"; press_any_key ;;
-            10)
-                if confirm "确认卸载？"; then
-                    service_stop sing-box
-                    rm -f /etc/systemd/system/sing-box.service "$SINGBOX_BIN"
-                    rm -rf "$SINGBOX_DIR"
-                    systemctl daemon-reload
-                    log_success "已卸载"
-                fi
-                press_any_key
-                ;;
+            9) uninstall_singbox_node; press_any_key ;;
+            10) service_restart sing-box; log_success "已重启"; press_any_key ;;
             0) return ;;
         esac
     done
