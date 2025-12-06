@@ -76,31 +76,34 @@ if [[ ! -f "$INSTALL_PATH" ]]; then
 fi
 
 # 首先安装基础工具（在任何其他操作之前）
-install_base_deps() {
-    # 直接安装所有可能需要的基础包，避免检测逻辑依赖缺失的命令
-    local need_install=0
-    
-    # 简单检测几个关键命令
-    command -v awk >/dev/null 2>&1 || need_install=1
-    command -v sed >/dev/null 2>&1 || need_install=1
-    command -v head >/dev/null 2>&1 || need_install=1
-    command -v curl >/dev/null 2>&1 || need_install=1
-    
-    if [[ $need_install -eq 1 ]]; then
-        echo "安装基础依赖..."
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq >/dev/null 2>&1
-            apt-get install -y coreutils gawk sed grep curl wget ncurses-bin >/dev/null 2>&1
-        elif command -v yum >/dev/null 2>&1; then
-            yum install -y coreutils gawk sed grep curl wget ncurses >/dev/null 2>&1
-        elif command -v dnf >/dev/null 2>&1; then
-            dnf install -y coreutils gawk sed grep curl wget ncurses >/dev/null 2>&1
-        fi
-        # 重新加载命令缓存
-        hash -r 2>/dev/null
+# 检测几个关键命令是否存在
+_need_deps=0
+command -v awk >/dev/null 2>&1 || _need_deps=1
+command -v grep >/dev/null 2>&1 || _need_deps=1
+command -v sed >/dev/null 2>&1 || _need_deps=1
+command -v head >/dev/null 2>&1 || _need_deps=1
+command -v cat >/dev/null 2>&1 || _need_deps=1
+command -v tr >/dev/null 2>&1 || _need_deps=1
+command -v basename >/dev/null 2>&1 || _need_deps=1
+command -v mkdir >/dev/null 2>&1 || _need_deps=1
+command -v sleep >/dev/null 2>&1 || _need_deps=1
+command -v shuf >/dev/null 2>&1 || _need_deps=1
+command -v ss >/dev/null 2>&1 || _need_deps=1
+
+if [[ $_need_deps -eq 1 ]]; then
+    echo "检测到缺少基础命令，正在安装..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq 2>/dev/null
+        apt-get install -y coreutils gawk sed grep curl wget iproute2 ncurses-bin jq 2>/dev/null
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y coreutils gawk sed grep curl wget iproute ncurses jq 2>/dev/null
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y coreutils gawk sed grep curl wget iproute ncurses jq 2>/dev/null
     fi
-}
-install_base_deps
+    hash -r 2>/dev/null
+    echo "基础依赖安装完成"
+fi
+unset _need_deps
 
 # 定义 clear 函数（如果仍然不存在）
 if ! command -v clear &>/dev/null; then
@@ -250,19 +253,54 @@ confirm() {
 }
 
 random_string() {
-    tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-16}"
+    local len=${1:-16}
+    if command -v tr &>/dev/null && command -v head &>/dev/null; then
+        tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len"
+    else
+        # 纯 bash 备用方案
+        local chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+        local result=""
+        for ((i=0; i<len; i++)); do
+            result+="${chars:RANDOM%${#chars}:1}"
+        done
+        echo "$result"
+    fi
 }
 
 random_hex() {
-    tr -dc 'a-f0-9' </dev/urandom | head -c "${1:-8}"
+    local len=${1:-8}
+    if command -v tr &>/dev/null && command -v head &>/dev/null; then
+        tr -dc 'a-f0-9' </dev/urandom | head -c "$len"
+    else
+        local chars='0123456789abcdef'
+        local result=""
+        for ((i=0; i<len; i++)); do
+            result+="${chars:RANDOM%16:1}"
+        done
+        echo "$result"
+    fi
 }
 
 random_port() {
-    shuf -i "${1:-10000}-${2:-65535}" -n 1
+    local min=${1:-10000}
+    local max=${2:-65535}
+    if command -v shuf &>/dev/null; then
+        shuf -i "${min}-${max}" -n 1
+    else
+        echo $((RANDOM % (max - min + 1) + min))
+    fi
 }
 
 check_port_available() {
-    ! ss -tuln | grep -q ":${1} "
+    local port=$1
+    if command -v ss &>/dev/null; then
+        ! ss -tuln 2>/dev/null | grep -q ":${port} "
+    elif command -v netstat &>/dev/null; then
+        ! netstat -tuln 2>/dev/null | grep -q ":${port} "
+    else
+        # 无法检测，假设可用
+        return 0
+    fi
 }
 
 get_available_port() {
@@ -279,7 +317,11 @@ get_ipv4() {
     [[ -z "$ip" ]] && ip=$(curl -s4m8 ipinfo.io/ip 2>/dev/null)
     [[ -z "$ip" ]] && ip=$(curl -s4m8 api.ipify.org 2>/dev/null)
     [[ -z "$ip" ]] && ip=$(curl -s4m8 ifconfig.me 2>/dev/null)
-    [[ -z "$ip" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    if [[ -z "$ip" ]]; then
+        local ips
+        ips=$(hostname -I 2>/dev/null)
+        ip="${ips%% *}"  # 取第一个 IP
+    fi
     echo "$ip"
 }
 
@@ -359,16 +401,28 @@ show_system_info() {
     echo
     
     echo -e "${YELLOW}【内存信息】${NC}"
-    local mem_total=$(free -m | awk '/Mem:/ {print $2}')
-    local mem_used=$(free -m | awk '/Mem:/ {print $3}')
-    local swap_total=$(free -m | awk '/Swap:/ {print $2}')
-    echo -e "  总内存:   ${GREEN}${mem_total} MB${NC}"
-    echo -e "  已使用:   ${GREEN}${mem_used} MB${NC}"
-    echo -e "  Swap:     ${GREEN}${swap_total} MB${NC}"
+    local mem_info mem_total mem_used swap_total
+    if command -v free &>/dev/null; then
+        mem_info=$(free -m 2>/dev/null)
+        mem_total=$(echo "$mem_info" | awk '/Mem:/ {print $2}')
+        mem_used=$(echo "$mem_info" | awk '/Mem:/ {print $3}')
+        swap_total=$(echo "$mem_info" | awk '/Swap:/ {print $2}')
+    else
+        mem_total=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print int($2/1024)}')
+        mem_used=$((mem_total - $(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print int($2/1024)}')))
+        swap_total=$(grep SwapTotal /proc/meminfo 2>/dev/null | awk '{print int($2/1024)}')
+    fi
+    echo -e "  总内存:   ${GREEN}${mem_total:-未知} MB${NC}"
+    echo -e "  已使用:   ${GREEN}${mem_used:-未知} MB${NC}"
+    echo -e "  Swap:     ${GREEN}${swap_total:-0} MB${NC}"
     echo
     
     echo -e "${YELLOW}【磁盘信息】${NC}"
-    df -h / | awk 'NR==2 {printf "  根分区:   \033[32m总计 %s, 已用 %s (%s)\033[0m\n", $2, $3, $5}'
+    if command -v df &>/dev/null && command -v awk &>/dev/null; then
+        df -h / 2>/dev/null | awk 'NR==2 {printf "  根分区:   \033[32m总计 %s, 已用 %s (%s)\033[0m\n", $2, $3, $5}'
+    else
+        echo -e "  根分区:   ${GREEN}无法获取${NC}"
+    fi
     echo
     
     echo -e "${YELLOW}【网络信息】${NC}"
@@ -380,9 +434,13 @@ show_system_info() {
     echo
     
     echo -e "${YELLOW}【运行状态】${NC}"
-    local uptime_str=$(uptime -p 2>/dev/null || uptime | awk -F'up' '{print $2}' | cut -d',' -f1)
-    local load=$(uptime | awk -F'load average:' '{print $2}' | xargs)
-    local bbr=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
+    local uptime_str load bbr
+    uptime_str=$(uptime -p 2>/dev/null)
+    if [[ -z "$uptime_str" ]]; then
+        uptime_str=$(uptime 2>/dev/null | sed 's/.*up//' | cut -d',' -f1 | xargs)
+    fi
+    load=$(uptime 2>/dev/null | sed 's/.*load average://' | xargs)
+    bbr=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | cut -d= -f2 | xargs)
     echo -e "  运行时间: ${GREEN}${uptime_str}${NC}"
     echo -e "  系统负载: ${GREEN}${load}${NC}"
     echo -e "  TCP拥塞:  ${GREEN}${bbr:-未知}${NC}"
@@ -429,7 +487,13 @@ manage_swap() {
     echo -e "${CYAN}            Swap 管理${NC}"
     print_line
     
-    local swap_total=$(free -m | awk '/Swap:/ {print $2}')
+    local swap_total
+    if command -v free &>/dev/null; then
+        swap_total=$(free -m 2>/dev/null | grep -i swap | while read _ total _; do echo "$total"; done)
+    else
+        swap_total=$(grep SwapTotal /proc/meminfo 2>/dev/null | while read _ kb _; do echo $((kb/1024)); done)
+    fi
+    swap_total=${swap_total:-0}
     echo -e "当前 Swap: ${GREEN}${swap_total} MB${NC}"
     echo
     print_menu_item "1" "创建/调整 Swap"
@@ -517,8 +581,9 @@ system_menu() {
 
 # ==================== BBR 模块 ====================
 check_bbr_status() {
-    local algo=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
-    local qdisc=$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')
+    local algo qdisc
+    algo=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | cut -d= -f2 | xargs)
+    qdisc=$(sysctl net.core.default_qdisc 2>/dev/null | cut -d= -f2 | xargs)
     echo -e "${YELLOW}【当前 BBR 状态】${NC}"
     echo -e "  拥塞控制: ${GREEN}${algo:-未知}${NC}"
     echo -e "  队列算法: ${GREEN}${qdisc:-未知}${NC}"
@@ -580,7 +645,10 @@ install_bbr_v3() {
         wget -q --show-progress "$url" -P /tmp/ || { log_error "下载失败"; return 1; }
     done
     
-    dpkg -l | grep "joeyblog" | awk '{print $2}' | xargs -r apt-get remove --purge -y >/dev/null 2>&1
+    # 移除旧内核
+    local old_pkgs
+    old_pkgs=$(dpkg -l 2>/dev/null | grep "joeyblog" | while read _ pkg _; do echo "$pkg"; done)
+    [[ -n "$old_pkgs" ]] && apt-get remove --purge -y $old_pkgs >/dev/null 2>&1
     dpkg -i /tmp/linux-*.deb
     command -v update-grub &>/dev/null && update-grub
     rm -f /tmp/linux-*.deb
@@ -595,7 +663,8 @@ update_bbr_v3() {
     echo -e "${CYAN}          更新 BBR v3 内核${NC}"
     print_line
     
-    local current_ver=$(dpkg -l 2>/dev/null | grep "linux-image.*joeyblog" | awk '{print $3}' | head -1)
+    local current_ver
+    current_ver=$(dpkg -l 2>/dev/null | grep "linux-image.*joeyblog" | head -1 | while read _ _ ver _; do echo "$ver"; done)
     if [[ -z "$current_ver" ]]; then
         log_error "未检测到 BBR v3 内核，请先安装"
         return 1
@@ -657,7 +726,9 @@ change_ssh_port() {
     echo -e "${CYAN}          修改 SSH 端口${NC}"
     print_line
     
-    local current=$(grep -E "^#?Port " /etc/ssh/sshd_config | tail -1 | awk '{print $2}')
+    local current line
+    line=$(grep -E "^#?Port " /etc/ssh/sshd_config 2>/dev/null | tail -1)
+    current="${line##* }"
     echo -e "当前端口: ${GREEN}${current:-22}${NC}"
     
     read -r -p "新端口 [1-65535]: " new_port
@@ -724,7 +795,9 @@ install_fail2ban_full() {
     [[ ! -f /var/log/auth.log ]] && touch /var/log/auth.log
     
     # 配置 SSH 防护
-    local ssh_port=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    local ssh_port line
+    line=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null)
+    ssh_port="${line##* }"
     ssh_port=${ssh_port:-22}
     
     cat > /etc/fail2ban/jail.local << EOF
@@ -793,7 +866,10 @@ show_fail2ban_banned() {
     fi
     
     echo -e "${YELLOW}【当前封禁 IP】${NC}"
-    local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*:\s*//' | tr ',' ' ')
+    local jails line
+    line=$(fail2ban-client status 2>/dev/null | grep "Jail list")
+    jails="${line##*:}"
+    jails=$(echo "$jails" | tr ',' ' ' | xargs)
     
     if [[ -z "$jails" ]]; then
         echo "无活动监控"
@@ -802,7 +878,8 @@ show_fail2ban_banned() {
     
     for jail in $jails; do
         echo -e "\n${GREEN}[$jail]${NC}"
-        local banned=$(fail2ban-client status "$jail" 2>/dev/null | grep "Banned IP" | sed 's/.*:\s*//')
+        line=$(fail2ban-client status "$jail" 2>/dev/null | grep "Banned IP")
+        local banned="${line##*:}"
         if [[ -n "$banned" && "$banned" != " " ]]; then
             echo "$banned" | tr ' ' '\n' | while read ip; do
                 [[ -n "$ip" ]] && echo "  - $ip"
@@ -1003,7 +1080,11 @@ security_menu() {
 # ==================== Docker 模块 ====================
 check_docker() {
     if command -v docker &>/dev/null; then
-        echo -e "Docker: ${GREEN}$(docker --version | awk '{print $3}' | tr -d ',')${NC} ($(service_status docker))"
+        local ver
+        ver=$(docker --version 2>/dev/null)
+        ver="${ver#*version }"
+        ver="${ver%%,*}"
+        echo -e "Docker: ${GREEN}${ver}${NC} ($(service_status docker))"
         return 0
     else
         echo -e "Docker: ${RED}未安装${NC}"
@@ -1240,9 +1321,13 @@ EOF
 show_snell_config() {
     [[ ! -f "$SNELL_CONF" ]] && { log_error "未安装"; return; }
     
-    local port=$(grep "^listen" "$SNELL_CONF" | awk -F':' '{print $NF}')
-    local psk=$(grep "^psk" "$SNELL_CONF" | awk -F'= ' '{print $2}')
-    local ver=$(grep "^version" "$SNELL_CONF" | awk -F'= ' '{print $2}')
+    local port psk ver line
+    line=$(grep "^listen" "$SNELL_CONF" 2>/dev/null)
+    port="${line##*:}"
+    line=$(grep "^psk" "$SNELL_CONF" 2>/dev/null)
+    psk="${line#*= }"
+    line=$(grep "^version" "$SNELL_CONF" 2>/dev/null)
+    ver="${line#*= }"
     local ip=$(get_ipv4)
     
     print_line
@@ -1782,9 +1867,12 @@ install_vless_reality() {
     read -r -p "UUID (默认随机): " uuid; uuid=${uuid:-$($SINGBOX_BIN generate uuid)}
     read -r -p "SNI (默认 www.apple.com): " sni; sni=${sni:-www.apple.com}
     
-    local keys=$($SINGBOX_BIN generate reality-keypair)
-    local private_key=$(echo "$keys" | grep "PrivateKey" | awk '{print $2}')
-    local public_key=$(echo "$keys" | grep "PublicKey" | awk '{print $2}')
+    local keys private_key public_key line
+    keys=$($SINGBOX_BIN generate reality-keypair)
+    line=$(echo "$keys" | grep "PrivateKey")
+    private_key="${line##* }"
+    line=$(echo "$keys" | grep "PublicKey")
+    public_key="${line##* }"
     local short_id=$(random_hex 8)
     
     # 保存 inbound 配置
