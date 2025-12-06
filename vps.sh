@@ -8,7 +8,7 @@
 #
 
 # 强制设置 PATH
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export LANG=C.UTF-8
 
 # 检查是否为 root
@@ -17,32 +17,29 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# 检查基础工具，如果缺失则安装后重新执行
-check_and_install_base_tools() {
-    local need_install=0
-    command -v awk &>/dev/null || need_install=1
-    command -v sed &>/dev/null || need_install=1
-    command -v clear &>/dev/null || need_install=1
+# 首先安装基础工具（在任何其他操作之前）
+install_base_deps() {
+    # 检查是否缺少基础命令
+    local missing=""
+    /usr/bin/which awk >/dev/null 2>&1 || missing="$missing gawk"
+    /usr/bin/which sed >/dev/null 2>&1 || missing="$missing sed"
+    /usr/bin/which clear >/dev/null 2>&1 || missing="$missing ncurses-bin"
+    /usr/bin/which curl >/dev/null 2>&1 || missing="$missing curl"
+    /usr/bin/which wget >/dev/null 2>&1 || missing="$missing wget"
     
-    if [[ $need_install -eq 1 ]]; then
-        echo "检测到缺少基础工具，正在安装..."
-        if command -v apt-get &>/dev/null; then
-            apt-get update -qq
-            apt-get install -y -qq gawk sed ncurses-bin coreutils >/dev/null 2>&1
-        elif command -v yum &>/dev/null; then
-            yum install -y -q gawk sed ncurses coreutils >/dev/null 2>&1
+    if [[ -n "$missing" ]]; then
+        echo "安装基础依赖:$missing"
+        if [[ -f /usr/bin/apt-get ]]; then
+            /usr/bin/apt-get update -qq >/dev/null 2>&1
+            /usr/bin/apt-get install -y $missing >/dev/null 2>&1
+        elif [[ -f /usr/bin/yum ]]; then
+            /usr/bin/yum install -y $missing >/dev/null 2>&1
         fi
-        
-        # 安装后重新执行脚本
-        if [[ -f "$0" && "$0" != "/dev/fd/"* && "$0" != "bash" ]]; then
-            exec bash "$0" "$@"
-        else
-            echo "基础工具已安装，请重新运行脚本"
-            exit 0
-        fi
+        # 重新加载 PATH
+        hash -r
     fi
 }
-check_and_install_base_tools
+install_base_deps
 
 # 定义 clear 函数（如果仍然不存在）
 if ! command -v clear &>/dev/null; then
@@ -299,30 +296,6 @@ show_system_info() {
     print_line
 }
 
-install_common_tools() {
-    clear
-    print_line
-    echo -e "${CYAN}            安装常用工具${NC}"
-    print_line
-    
-    local tools="curl wget vim git jq unzip tar htop lsof qrencode"
-    echo -e "${YELLOW}将安装: ${tools}${NC}"
-    echo
-    
-    if confirm "确认安装？"; then
-        pkg_update
-        for tool in $tools; do
-            echo -ne "  安装 ${tool}... "
-            if pkg_install "$tool"; then
-                echo -e "${GREEN}✓${NC}"
-            else
-                echo -e "${RED}✗${NC}"
-            fi
-        done
-        log_success "安装完成"
-    fi
-}
-
 set_timezone() {
     clear
     print_line
@@ -396,9 +369,9 @@ system_update_full() {
     print_line
     
     echo -e "${YELLOW}将执行以下操作:${NC}"
-    echo "  1. 更新软件包列表 (apt update)"
-    echo "  2. 升级已安装软件 (apt upgrade)"
-    echo "  3. 安装基础依赖 (curl wget sudo unzip socat vnstat nano)"
+    echo "  1. 更新软件包列表"
+    echo "  2. 升级已安装软件"
+    echo "  3. 安装常用工具"
     echo
     
     if confirm "确认执行？"; then
@@ -408,11 +381,11 @@ system_update_full() {
         log_info "升级已安装软件..."
         pkg_upgrade
         
-        log_info "安装基础依赖..."
-        local deps="curl wget sudo unzip socat vnstat nano"
-        for dep in $deps; do
-            echo -ne "  安装 ${dep}... "
-            if pkg_install "$dep"; then
+        log_info "安装常用工具..."
+        local tools="curl wget vim git jq unzip tar htop socat vnstat nano lsof"
+        for tool in $tools; do
+            echo -ne "  安装 ${tool}... "
+            if pkg_install "$tool"; then
                 echo -e "${GREEN}✓${NC}"
             else
                 echo -e "${YELLOW}跳过${NC}"
@@ -430,21 +403,19 @@ system_menu() {
         echo -e "${CYAN}            系统信息与优化${NC}"
         print_line
         print_menu_item "1" "查看系统信息"
-        print_menu_item "2" "系统更新 (更新+安装基础依赖)"
-        print_menu_item "3" "安装常用工具"
-        print_menu_item "4" "时区设置"
-        print_menu_item "5" "Swap 管理"
+        print_menu_item "2" "系统更新"
+        print_menu_item "3" "时区设置"
+        print_menu_item "4" "Swap 管理"
         print_line
         print_menu_item "0" "返回主菜单"
         print_line
         
-        read -r -p "请选择 [0-5]: " choice
+        read -r -p "请选择 [0-4]: " choice
         case $choice in
             1) show_system_info; press_any_key ;;
             2) system_update_full; press_any_key ;;
-            3) install_common_tools; press_any_key ;;
-            4) set_timezone; press_any_key ;;
-            5) manage_swap; press_any_key ;;
+            3) set_timezone; press_any_key ;;
+            4) manage_swap; press_any_key ;;
             0) return ;;
         esac
     done
@@ -1414,6 +1385,8 @@ install_acme() {
         log_info "安装 acme.sh..."
         curl -sL https://get.acme.sh | sh -s email=admin@example.com
         source "$ACME_HOME/acme.sh.env" 2>/dev/null
+        # 切换到 Let's Encrypt（避免 ZeroSSL 需要注册）
+        "$ACME_HOME/acme.sh" --set-default-ca --server letsencrypt 2>/dev/null
     fi
 }
 
@@ -1428,13 +1401,14 @@ apply_cert_cf() {
     echo -e "请准备 Cloudflare API Token (需要 Zone:DNS:Edit 权限)"
     echo
     
-    read -r -p "Cloudflare API Token: " cf_token
+    echo -n "Cloudflare API Token: "
+    read -r cf_token
     [[ -z "$cf_token" ]] && { log_error "Token 不能为空"; return 1; }
     
     export CF_Token="$cf_token"
     
     log_info "申请证书: ${domain}..."
-    "$ACME_HOME/acme.sh" --issue --dns dns_cf -d "$domain" --keylength ec-256 --force
+    "$ACME_HOME/acme.sh" --issue --dns dns_cf -d "$domain" --keylength ec-256 --force --server letsencrypt
     
     if [[ $? -eq 0 ]]; then
         "$ACME_HOME/acme.sh" --install-cert -d "$domain" --ecc \
@@ -1462,7 +1436,7 @@ apply_cert_http() {
     fi
     
     log_info "申请证书: ${domain}..."
-    "$ACME_HOME/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 --force
+    "$ACME_HOME/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 --force --server letsencrypt
     
     if [[ $? -eq 0 ]]; then
         "$ACME_HOME/acme.sh" --install-cert -d "$domain" --ecc \
@@ -1506,7 +1480,8 @@ select_tls_mode() {
             eval "$skip_verify_var='true'"
             ;;
         2)
-            read -r -p "你的域名 (如 example.com): " domain
+            echo -n "你的域名 (如 example.com): "
+            read -r domain
             [[ -z "$domain" ]] && { log_error "域名不能为空"; return 1; }
             
             if apply_cert_cf "$domain"; then
@@ -1519,7 +1494,8 @@ select_tls_mode() {
             fi
             ;;
         3)
-            read -r -p "你的域名 (需解析到本机IP): " domain
+            echo -n "你的域名 (需解析到本机IP): "
+            read -r domain
             [[ -z "$domain" ]] && { log_error "域名不能为空"; return 1; }
             
             if apply_cert_http "$domain"; then
