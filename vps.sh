@@ -184,7 +184,7 @@ system_update() {
     esac
     
     log_info "安装常用工具..."
-    install_pkg curl; install_pkg wget; install_pkg git; install_pkg vim
+    install_pkg curl; install_pkg wget; install_pkg git; install_pkg nano
     install_pkg jq; install_pkg tar; install_pkg unzip; install_pkg openssl
     install_pkg cron; install_pkg iptables; install_pkg socat
     
@@ -263,7 +263,7 @@ install_fail2ban() {
     echo "1. 安装启用 (自动适配SSH端口)"
     echo "2. 查看封禁状态"
     echo "3. 解封指定 IP"
-    echo "4. 修改配置文件 (vim)"
+    echo "4. 修改配置文件 (nano)"
     echo "5. 卸载 Fail2ban"
     echo "0. 返回"
     read -r -p "选: " c
@@ -298,7 +298,7 @@ EOF
            ;;
         2) fail2ban-client status sshd; press_any_key ;;
         3) read -r -p "要解封的 IP: " ip; fail2ban-client set sshd unbanip "$ip"; press_any_key ;;
-        4) vim /etc/fail2ban/jail.local; systemctl restart fail2ban; log_success "配置已更新并重启服务"; press_any_key ;;
+        4) nano /etc/fail2ban/jail.local; systemctl restart fail2ban; log_success "配置已更新并重启服务"; press_any_key ;;
         5) systemctl stop fail2ban; apt-get remove --purge -y fail2ban 2>/dev/null || yum remove -y fail2ban 2>/dev/null; rm -rf /etc/fail2ban; log_success "已卸载"; press_any_key ;;
         0) return;;
     esac
