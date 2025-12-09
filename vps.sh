@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# VPS 一键管理工具箱 (Refactored v4.0.0)
-# 专为新手设计，集成高级 BBR、Snell、Fail2ban、网络诊断与多协议节点部署
+# VPS 一键管理工具箱 (Refactored v4.1.0)
+# 专为新手设计，集成高级 BBR、Snell、Fail2ban、SSH管理、证书申请与多协议节点部署
 #
 # GitHub: https://github.com/your-username/vps-toolkit
 #
@@ -16,10 +16,10 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-SCRIPT_VERSION="4.0.0"
+SCRIPT_VERSION="4.1.0"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/your-username/vps-toolkit/main/vps.sh"
 INSTALL_PATH="/usr/local/bin/vps"
-LOG_FILE="/var/log/vps_manager.log"
+CERT_DIR="/etc/vps/cert"
 
 # ==================== 1. 核心工具函数 ====================
 
@@ -85,7 +85,6 @@ detect_os() {
 install_pkg() {
     local pkg=$1
     if ! command -v "$pkg" &>/dev/null; then
-        # log_info "正在安装 $pkg..."
         case $PACKAGE_MANAGER in
             apt-get) apt-get update -qq && apt-get install -y "$pkg" >/dev/null 2>&1 ;;
             yum) yum install -y "$pkg" >/dev/null 2>&1 ;;
@@ -121,7 +120,7 @@ system_update() {
         apk) apk update && apk upgrade ;;
     esac
     
-    log_info "安装常用工具 (curl, wget, git, vim, jq, tar, openssl, iptables)..."
+    log_info "安装常用工具..."
     install_pkg curl
     install_pkg wget
     install_pkg git
@@ -132,6 +131,7 @@ system_update() {
     install_pkg openssl
     install_pkg cron
     install_pkg iptables
+    install_pkg socat # for acme.sh
     
     log_success "系统更新完成！"
     press_any_key
@@ -212,7 +212,6 @@ system_maintenance_menu() {
         print_title "系统维护工具"
         echo "1. 清理系统日志 (释放空间)"
         echo "2. 设置 IPv4 优先 (解决 Google 验证码)"
-        echo "3. 开启/关闭 IPv6"
         echo "0. 返回"
         read -r -p "请选择: " choice
         
@@ -220,7 +219,6 @@ system_maintenance_menu() {
             1)
                 log_info "正在清理日志..."
                 journalctl --vacuum-time=1d >/dev/null 2>&1
-                journalctl --vacuum-size=50M >/dev/null 2>&1
                 rm -rf /var/log/*.gz /var/log/*.[0-9]
                 echo > /var/log/syslog
                 echo > /var/log/auth.log
@@ -232,16 +230,12 @@ system_maintenance_menu() {
                 log_success "已设置为 IPv4 优先！"
                 press_any_key
                 ;;
-            3)
-                log_info "该功能处于 TODO 状态..."
-                press_any_key
-                ;;
             0) return ;;
         esac
     done
 }
 
-# ==================== 3. 安全防护模块 ====================
+# ==================== 3. 安全与 SSH 模块 ====================
 
 install_fail2ban() {
     print_title "Fail2ban 安装与配置"
@@ -252,8 +246,8 @@ install_fail2ban() {
         echo -e "Fail2ban 状态: ${RED}未安装${NC}"
     fi
     echo
-    echo "1. 安装并启用 Fail2ban (SSH防爆破)"
-    echo "2. 查看封禁 IP 列表"
+    echo "1. 安装并启用 Fail2ban"
+    echo "2. 查看封禁 IP"
     echo "3. 解封指定 IP"
     echo "4. 卸载 Fail2ban"
     echo "0. 返回"
@@ -261,10 +255,8 @@ install_fail2ban() {
     read -r -p "请选择: " choice
     case $choice in
         1)
-            log_info "正在安装 Fail2ban..."
+            log_info "安装 Fail2ban..."
             install_pkg fail2ban
-            
-            # 配置 jail.local
             cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8
@@ -280,205 +272,116 @@ backend = %(sshd_backend)s
 EOF
             systemctl enable fail2ban
             systemctl restart fail2ban
-            log_success "Fail2ban 已启用！规则: 10分钟内失败5次，封禁24小时。"
+            log_success "Fail2ban 已启用！"
             ;;
-        2)
-            fail2ban-client status sshd
-            ;;
-        3)
-            read -r -p "请输入要解封的 IP: " ip
-            fail2ban-client set sshd unbanip "$ip"
-            log_success "尝试解封 $ip"
-            ;;
-        4)
-            systemctl stop fail2ban
-            systemctl disable fail2ban
-            case $PACKAGE_MANAGER in
-                apt-get) apt-get remove --purge -y fail2ban ;;
-                yum) yum remove -y fail2ban ;;
-            esac
-            rm -rf /etc/fail2ban
-            log_success "Fail2ban 已卸载"
-            ;;
+        2) fail2ban-client status sshd ;;
+        3) read -r -p "输入IP: " ip; fail2ban-client set sshd unbanip "$ip"; log_success "操作完成" ;;
+        4) systemctl stop fail2ban; apt-get remove --purge -y fail2ban 2>/dev/null || yum remove -y fail2ban 2>/dev/null; rm -rf /etc/fail2ban; log_success "已卸载" ;;
         0) return ;;
     esac
     press_any_key
 }
 
-manage_firewall() {
-    print_title "防火墙端口管理"
-    echo "自动检测并放行脚本常用端口 (SSH, Sing-box, Snell, Docker)"
+manage_ssh() {
+    print_title "SSH 管理"
+    local port=$(grep "^Port" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+    [[ -z "$port" ]] && port=22
+    echo -e "当前端口: ${GREEN}$port${NC}"
     echo
-    local ssh_port=$(grep "^Port" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
-    [[ -z "$ssh_port" ]] && ssh_port=22
-    
-    log_info "SSH 端口: $ssh_port"
-    
-    if command -v ufw &>/dev/null; then
-        log_info "检测到 UFW，正在添加规则..."
-        ufw allow "$ssh_port"/tcp
-        ufw allow 80/tcp
-        ufw allow 443/tcp
-        ufw allow 8443/tcp
-        ufw allow 8443/udp
-        # Sing-box 常用端口
-        ufw allow 443:65535/tcp
-        ufw allow 443:65535/udp
-        log_success "UFW 规则已更新 (已放行 443-65535)"
-    elif command -v firewall-cmd &>/dev/null; then
-        log_info "检测到 Firewalld，正在添加规则..."
-        firewall-cmd --permanent --add-port="$ssh_port"/tcp
-        firewall-cmd --permanent --add-port=80/tcp
-        firewall-cmd --permanent --add-port=443/tcp
-        firewall-cmd --permanent --add-port=443-65535/tcp
-        firewall-cmd --permanent --add-port=443-65535/udp
-        firewall-cmd --reload
-        log_success "Firewalld 规则已更新"
-    else
-        log_info "检测到 iptables，正在添加规则..."
-        iptables -I INPUT -p tcp --dport "$ssh_port" -j ACCEPT
-        iptables -I INPUT -p tcp --dport 80 -j ACCEPT
-        iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-        iptables -I INPUT -p tcp --dport 8443 -j ACCEPT
-        iptables -I INPUT -p udp --dport 8443 -j ACCEPT
-        log_success "iptables 规则已更新 (注意: 重启后需手动保存)"
-    fi
-    press_any_key
-}
-
-# ==================== 4. 高级 BBR 模块 ====================
-
-install_bbr_kernel() {
-    if [[ "$OS" != "debian" && "$OS" != "ubuntu" ]]; then
-         log_error "安装内核仅支持 Debian/Ubuntu 系统"
-         return
-    fi
-
-    print_title "安装 BBR v3 内核"
-    log_info "正在从 GitHub 获取最新内核..."
-    
-    local api_url="https://api.github.com/repos/byJoey/Actions-bbr-v3/releases/latest"
-    local arch_match="x86_64"
-    [[ "$ARCH" == "aarch64" ]] && arch_match="arm64"
-    
-    local download_urls=$(curl -s "$api_url" | grep "browser_download_url" | grep "$arch_match" | cut -d '"' -f 4)
-    
-    if [[ -z "$download_urls" ]]; then
-        log_error "未找到适配该架构的内核文件"
-        press_any_key
-        return
-    fi
-    
-    mkdir -p /tmp/bbr_kernel
-    cd /tmp/bbr_kernel
-    rm -f *.deb
-    
-    for url in $download_urls; do
-        log_info "下载: ${url##*/}"
-        wget -q --show-progress "$url"
-    done
-    
-    log_info "正在安装内核..."
-    dpkg -i *.deb
-    
-    rm -rf /tmp/bbr_kernel
-    
-    log_success "内核安装完成！请重启系统以生效。"
-    if confirm "是否立即重启？"; then
-        reboot
-    fi
-}
-
-enable_bbr_algo() {
-    print_title "配置 BBR 拥塞控制"
-    echo "1. 启用 BBR + FQ (推荐)"
-    echo "2. 启用 BBR + FQ_PIE"
-    echo "3. 启用 BBR + CAKE"
+    echo "1. 修改 SSH 端口"
+    echo "2. 修改 Root 密码"
     echo "0. 返回"
     
     read -r -p "请选择: " choice
-    local qdisc="fq"
     case $choice in
-        1) qdisc="fq" ;;
-        2) qdisc="fq_pie" ;;
-        3) qdisc="cake" ;;
+        1)
+            read -r -p "请输入新端口 (1024-65535): " new_port
+            if [[ ! "$new_port" =~ ^[0-9]+$ ]] || [[ "$new_port" -lt 1024 || "$new_port" -gt 65535 ]]; then
+                log_error "端口无效！"
+                press_any_key
+                return
+            fi
+            
+            # 修改配置
+            if grep -q "^Port" /etc/ssh/sshd_config; then
+                sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
+            else
+                echo "Port $new_port" >> /etc/ssh/sshd_config
+            fi
+            
+            # 放行防火墙
+            if command -v ufw &>/dev/null; then
+                ufw allow "$new_port"/tcp
+            elif command -v firewall-cmd &>/dev/null; then
+                firewall-cmd --permanent --add-port="$new_port"/tcp
+                firewall-cmd --reload
+            else
+                iptables -I INPUT -p tcp --dport "$new_port" -j ACCEPT
+            fi
+            
+            systemctl restart sshd
+            log_success "SSH 端口已修改为 $new_port，请务必使用新端口重连！"
+            ;;
+        2)
+            log_info "请按照提示输入新密码："
+            passwd root
+            log_success "密码修改完成！"
+            ;;
         0) return ;;
-        *) return ;;
     esac
-    
-    echo "net.core.default_qdisc = $qdisc" > /etc/sysctl.d/99-bbr.conf
-    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/99-bbr.conf
-    sysctl --system >/dev/null 2>&1
-    
-    log_success "已应用 BBR + $qdisc"
     press_any_key
 }
 
-bbr_menu() {
-    while true; do
-        local algo=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
-        local qdisc=$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')
-        
-        print_title "BBR 高级管理"
-        echo -e "当前状态: 算法=${GREEN}${algo:-未知}${NC} 队列=${GREEN}${qdisc:-未知}${NC}"
-        echo
-        echo "1. 安装 BBR v3 内核 (仅 Debian/Ubuntu)"
-        echo "2. 配置 BBR 算法 (FQ/CAKE)"
-        echo "0. 返回主菜单"
-        
-        read -r -p "请选择: " choice
-        case $choice in
-            1) install_bbr_kernel ;;
-            2) enable_bbr_algo ;;
-            0) return ;;
-        esac
-    done
+# ==================== 4. 证书管理模块 (Acme.sh) ====================
+
+install_acme() {
+    if ! command -v ~/.acme.sh/acme.sh &>/dev/null; then
+        log_info "安装 acme.sh..."
+        curl https://get.acme.sh | sh -s email=my@example.com
+        source ~/.bashrc
+    fi
 }
 
-# ==================== 5. Docker 模块 ====================
-
-manage_docker() {
-    if ! command -v docker &>/dev/null; then
-        print_title "安装 Docker"
-        echo "1. 官方源安装 (推荐国外 VPS)"
-        echo "2. 国内镜像源安装"
-        echo "0. 返回"
-        read -r -p "请选择: " choice
-        case $choice in
-            1) curl -fsSL https://get.docker.com | bash ;;
-            2) curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun ;;
-            *) return ;;
-        esac
-        systemctl enable docker; systemctl start docker
-        log_success "Docker 安装完成"
+request_cert() {
+    print_title "SSL 证书申请 (Cloudflare DNS)"
+    install_acme
+    
+    echo -e "${YELLOW}前置条件：域名已托管在 Cloudflare，且您拥有 API Key (Global API Key)。${NC}"
+    echo
+    read -r -p "请输入您的 Cloudflare 邮箱: " cf_email
+    read -r -p "请输入您的 Cloudflare Global API Key: " cf_key
+    read -r -p "请输入您的域名 (例如 example.com): " domain
+    
+    if [[ -z "$cf_email" || -z "$cf_key" || -z "$domain" ]]; then
+        log_error "信息不能为空！"
         press_any_key
         return
     fi
     
-    while true; do
-        print_title "Docker 管理"
-        echo "1. 容器列表 (活动)"
-        echo "2. 容器列表 (所有)"
-        echo "3. 启动/停止/重启/删除 容器"
-        echo "4. 查看日志"
-        echo "0. 返回"
-        read -r -p "请选择: " choice
-        case $choice in
-            1) docker ps; press_any_key ;;
-            2) docker ps -a; press_any_key ;;
-            3) 
-                read -r -p "容器名或ID: " name
-                read -r -p "操作 (start/stop/restart/rm): " action
-                docker "$action" "$name"
-                press_any_key 
-                ;;
-            4) read -r -p "容器名或ID: " name; docker logs "$name"; press_any_key ;;
-            0) return ;;
-        esac
-    done
+    # 导出环境变量
+    export CF_Key="$cf_key"
+    export CF_Email="$cf_email"
+    
+    log_info "正在申请证书 (泛域名 *.${domain} 和 ${domain})..."
+    ~/.acme.sh/acme.sh --issue --dns dns_cf -d "${domain}" -d "*.${domain}"
+    
+    if [[ $? -eq 0 ]]; then
+        log_success "证书申请成功！"
+        mkdir -p "$CERT_DIR"
+        ~/.acme.sh/acme.sh --install-cert -d "${domain}" \
+            --key-file       "$CERT_DIR/private.key"  \
+            --fullchain-file "$CERT_DIR/cert.pem" \
+            --reloadcmd     "chmod 644 $CERT_DIR/private.key $CERT_DIR/cert.pem"
+            
+        echo "$domain" > "$CERT_DIR/domain.txt"
+        log_success "证书已安装到 $CERT_DIR"
+    else
+        log_error "证书申请失败！请检查 API Key 或域名设置。"
+    fi
+    press_any_key
 }
 
-# ==================== 6. 节点协议模块 (Sing-box) ====================
+# ==================== 5. Sing-box 节点模块 ====================
 
 install_singbox() {
     if command -v sing-box &>/dev/null; then return; fi
@@ -494,6 +397,16 @@ gen_sb_config() {
     local server_name=$4
     local extra=$5
     
+    # 检查是否有真实证书
+    local use_real_cert=false
+    if [[ -f "$CERT_DIR/cert.pem" && -f "$CERT_DIR/private.key" && -f "$CERT_DIR/domain.txt" ]]; then
+        local cert_domain=$(cat "$CERT_DIR/domain.txt")
+        # 简单检查，如果不强制SNI或者SNI匹配，则使用
+        # 用法策略：有证书就用，ServerName 设为该域名
+        use_real_cert=true
+        server_name="$cert_domain" # 强制覆盖为真实域名
+    fi
+
     mkdir -p /etc/sing-box
     
     cat > /etc/sing-box/config.json <<EOF
@@ -508,6 +421,7 @@ gen_sb_config() {
 EOF
 
     if [[ "$type" == "vless" && "$extra" == *"reality"* ]]; then
+        # Reality 必须用自签 Key pair，不能用 CA 证书
         local pbk=$(echo "$extra" | cut -d, -f2)
         local pvk=$(echo "$extra" | cut -d, -f3)
         local sid=$(echo "$extra" | cut -d, -f4)
@@ -519,15 +433,18 @@ EOF
       }
 EOF
     elif [[ "$type" == "hysteria2" || "$type" == "vmess" || "$type" == "trojan" ]]; then
-        local cert_dir="/etc/sing-box/cert"
-        mkdir -p "$cert_dir"
-        openssl req -x509 -newkey rsa:2048 -keyout "$cert_dir/private.key" -out "$cert_dir/cert.pem" -days 3650 -nodes -subj "/CN=$server_name" >/dev/null 2>&1
+        local kp_cert="$CERT_DIR/cert.pem"
+        local kp_key="$CERT_DIR/private.key"
         
-        if [[ "$type" == "hysteria2" ]]; then
-             cat >> /etc/sing-box/config.json <<EOF
-      "users": [ { "password": "$uuid" } ],
-EOF
-        elif [[ "$type" == "trojan" ]]; then
+        # 如果没有真实证书, 生成自签
+        if [[ "$use_real_cert" == "false" ]]; then
+             kp_cert="/etc/sing-box/cert.pem"
+             kp_key="/etc/sing-box/private.key"
+             openssl req -x509 -newkey rsa:2048 -keyout "$kp_key" -out "$kp_cert" -days 3650 -nodes -subj "/CN=$server_name" >/dev/null 2>&1
+        fi
+        
+        # 用户部分
+        if [[ "$type" == "hysteria2" || "$type" == "trojan" ]]; then
              cat >> /etc/sing-box/config.json <<EOF
       "users": [ { "password": "$uuid" } ],
 EOF
@@ -538,7 +455,7 @@ EOF
         fi
         
         cat >> /etc/sing-box/config.json <<EOF
-      "tls": { "enabled": true, "certificate_path": "$cert_dir/cert.pem", "key_path": "$cert_dir/private.key" }
+      "tls": { "enabled": true, "certificate_path": "$kp_cert", "key_path": "$kp_key", "server_name": "$server_name" }
 EOF
     fi
 
@@ -548,19 +465,21 @@ EOF
   "outbounds": [ { "type": "direct", "tag": "direct" } ]
 }
 EOF
+    # 返回域名供分享链接使用
+    echo "$server_name" > /tmp/vps_last_sni
 }
 
 deploy_sb_node() {
     install_singbox
     print_title "Sing-box 节点部署"
-    echo "1. VLESS-Reality-Vision (推荐)"
-    echo "2. Hysteria2 (UDP，双向加速)"
+    echo "1. VLESS-Reality-Vision (推荐，无视证书)"
+    echo "2. Hysteria2 (UDP)"
     echo "3. Trojan-TLS"
     echo "4. VMess-TLS"
     echo "0. 返回"
     read -r -p "请选择: " choice
     
-    local port uuid server_name share_link
+    local port uuid server_name share_link real_domain
     read -r -p "端口 (默认443/8443): " port
     uuid=$(sing-box generate uuid)
     server_name="www.bing.com" 
@@ -579,21 +498,28 @@ deploy_sb_node() {
         2) 
             [[ -z "$port" ]] && port=8443
             local password=$(sing-box generate rand --hex 16)
-            uuid=$password 
             gen_sb_config "hysteria2" "$port" "$password" "$server_name"
-            share_link="hysteria2://$password@$(get_public_ip):$port?insecure=1&sni=$server_name#Hysteria2"
+            real_domain=$(cat /tmp/vps_last_sni) # 获取可能更新为真实域名的SNI
+            local insecure=1
+            [[ "$real_domain" != "www.bing.com" ]] && insecure=0 # 如果用了真实域名，则不跳过验证
+            share_link="hysteria2://$password@$(get_public_ip):$port?insecure=$insecure&sni=$real_domain#Hysteria2"
             ;;
         3) 
             [[ -z "$port" ]] && port=8443
             local password=$(sing-box generate rand --hex 8)
-            uuid=$password
             gen_sb_config "trojan" "$port" "$password" "$server_name"
-            share_link="trojan://$password@$(get_public_ip):$port?security=tls&allowInsecure=1&sni=$server_name#Trojan"
+            real_domain=$(cat /tmp/vps_last_sni)
+            local insecure=1
+            [[ "$real_domain" != "www.bing.com" ]] && insecure=0
+            share_link="trojan://$password@$(get_public_ip):$port?security=tls&allowInsecure=$insecure&sni=$real_domain#Trojan"
             ;;
         4) 
             [[ -z "$port" ]] && port=8443
             gen_sb_config "vmess" "$port" "$uuid" "$server_name"
-            share_link="vmess://(请手动添加: IP=$(get_public_ip), Port=$port, UUID=$uuid, TLS=on, AllowInsecure=on)"
+            real_domain=$(cat /tmp/vps_last_sni)
+            local insecure="on"
+            [[ "$real_domain" != "www.bing.com" ]] && insecure="off"
+            share_link="vmess://(请手动添加: Host=$real_domain, Port=$port, UUID=$uuid, TLS=on, AllowInsecure=$insecure)"
             ;;
         *) return ;;
     esac
@@ -601,7 +527,11 @@ deploy_sb_node() {
     systemctl restart sing-box
     log_success "部署成功！"
     echo -e "分享链接: ${CYAN}$share_link${NC}"
-    log_warn "注意：除 Reality 外，其他协议均使用自签证书，客户端请开启 'Allow Insecure'。"
+    if [[ "$choice" != "1" && "$real_domain" == "www.bing.com" ]]; then
+         log_warn "使用了自签证书，请在客户端开启 'Allow Insecure'。"
+    elif [[ "$choice" != "1" ]]; then
+         log_success "检测到并使用了真实证书 ($real_domain)，客户端无需跳过验证！"
+    fi
     press_any_key
 }
 
@@ -653,7 +583,7 @@ EOF
     press_any_key
 }
 
-# ==================== 7. 网络诊断工具模块 ====================
+# ==================== 6. 网络诊断工具模块 ====================
 
 network_tools_menu() {
     while true; do
@@ -682,6 +612,52 @@ network_tools_menu() {
     done
 }
 
+# ==================== 7. 其他模块 (BBR/Docker) ====================
+
+install_bbr_kernel() {
+    # 简化复用之前代码...
+    if [[ "$OS" != "debian" && "$OS" != "ubuntu" ]]; then log_error "仅支持 Debian/Ubuntu"; return; fi
+    print_title "安装 BBR v3"
+    log_info "从 GitHub 获取..."
+    local api_url="https://api.github.com/repos/byJoey/Actions-bbr-v3/releases/latest"
+    local match="x86_64"; [[ "$ARCH" == "aarch64" ]] && match="arm64"
+    local urls=$(curl -s "$api_url" | grep "browser_download_url" | grep "$match" | cut -d '"' -f 4)
+    if [[ -z "$urls" ]]; then log_error "未找到"; return; fi
+    mkdir -p /tmp/bbr; cd /tmp/bbr; rm -f *.deb
+    for u in $urls; do wget -q --show-progress "$u"; done
+    dpkg -i *.deb; rm -rf /tmp/bbr
+    log_success "安装需重启"; if confirm "重启?"; then reboot; fi
+}
+enable_bbr_algo() {
+    echo "1. FQ 2. FQ_PIE 3. CAKE"; read -r -p "选: " c
+    local q="fq"; [[ "$c" == "2" ]] && q="fq_pie"; [[ "$c" == "3" ]] && q="cake"
+    echo "net.core.default_qdisc = $q" > /etc/sysctl.d/99-bbr.conf
+    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/99-bbr.conf
+    sysctl --system >/dev/null 2>&1; log_success "已应用 BBR+$q"; press_any_key
+}
+bbr_menu() {
+    while true; do
+        print_title "BBR 管理"; echo "1. 安装内核 2. 配置算法 0. 返回"; read -r -p "选: " c
+        case $c in 1) install_bbr_kernel;; 2) enable_bbr_algo;; 0) return;; esac
+    done
+}
+manage_docker() {
+    if ! command -v docker &>/dev/null; then
+        echo "1. 官方源 2. 国内源"; read -r -p "选: " c
+        [[ "$c" == "1" ]] && curl -fsSL https://get.docker.com | bash
+        [[ "$c" == "2" ]] && curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun
+        systemctl enable docker; systemctl start docker; return
+    fi
+     while true; do
+        print_title "Docker"; echo "1. 列表(活) 2. 列表(全) 3. 管理(start/stop/rm) 4. 日志 0. 返回"; read -r -p "选: " c
+        case $c in
+            1) docker ps; press_any_key;; 2) docker ps -a; press_any_key;;
+            3) read -r -p "ID: " n; read -r -p "Cmd: " a; docker "$a" "$n"; press_any_key;;
+            4) read -r -p "ID: " n; docker logs "$n"; press_any_key;; 0) return;;
+        esac
+    done
+}
+
 # ==================== 8. 主菜单 ====================
 
 main_menu() {
@@ -691,20 +667,20 @@ main_menu() {
         echo
         echo -e "${YELLOW}--- 系统与安全 ---${NC}"
         echo "1. 系统环境更新 (更新/时区/Swap)"
-        echo "2. 安全防护 (Fail2ban/防火墙端口)"
-        echo "3. 高级 BBR 管理 (内核/算法)"
-        echo "4. 系统维护 (日志清理/IPv4优先)"
+        echo "2. SSH 管理 (端口/密码)"
+        echo "3. 安全防护 (Fail2ban/防火墙)"
+        echo "4. 高级 BBR 管理"
+        echo "5. 系统维护 (日志清理/IPv4优先)"
+        echo
+        echo -e "${YELLOW}--- 证书管理 ---${NC}"
+        echo "6. 申请 SSL 证书 (Cloudflare DNS)"
         echo
         echo -e "${YELLOW}--- 节点部署 ---${NC}"
-        echo "5. Sing-box 全协议 (Reality/Hy2/Trojan)"
-        echo "6. Snell v4 部署 (Surge专用)"
-        echo
-        echo -e "${YELLOW}--- 网络诊断 ---${NC}"
-        echo "7. 网络测速 & 流媒体检测"
+        echo "7. Sing-box 全协议 (智能证书适配)"
+        echo "8. Snell v4 部署 (Surge专用)"
         echo
         echo -e "${YELLOW}--- 其他 ---${NC}"
-        echo "8. Docker 管理"
-        echo "9. 检查脚本更新"
+        echo "9. 网络工具 & Docker & 更新"
         echo "0. 退出"
         
         echo
@@ -715,18 +691,22 @@ main_menu() {
                 read -r -p "-> " sub
                 case $sub in 1) system_update;; 2) set_timezone;; 3) manage_swap;; esac 
                 ;;
-            2)
-                echo "1. Fail2ban (防爆破)"; echo "2. 防火墙端口放行"; echo "0. 返回"
+            2) manage_ssh ;;
+            3) 
+                echo "1. Fail2ban"; echo "2. 防火墙端口"; echo "0. 返回"
                 read -r -p "-> " sub
                 case $sub in 1) install_fail2ban;; 2) manage_firewall;; esac
                 ;;
-            3) bbr_menu ;;
-            4) system_maintenance_menu ;;
-            5) deploy_sb_node ;;
-            6) install_snell ;;
-            7) network_tools_menu ;;
-            8) manage_docker ;;
-            9) update_script ;;
+            4) bbr_menu ;;
+            5) system_maintenance_menu ;;
+            6) request_cert ;;
+            7) deploy_sb_node ;;
+            8) install_snell ;;
+            9) 
+                echo "1. 网络诊断"; echo "2. Docker管理"; echo "3. 脚本更新"; echo "0. 返回"
+                 read -r -p "-> " sub
+                 case $sub in 1) network_tools_menu;; 2) manage_docker;; 3) update_script;; esac
+                 ;;
             0) exit 0 ;;
             *) log_error "无效选择"; press_any_key ;;
         esac
