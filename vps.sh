@@ -637,20 +637,22 @@ EOF
 
 # ==================== 6. 卸载与高级功能 ====================
 
-uninstall_menu() {
+script_maintenance_menu() {
     while true; do
-        print_title "卸载管理"
-        echo "1. 卸载 Sing-box (及配置)"
-        echo "2. 卸载 Snell"
-        echo "3. 卸载 Fail2ban"
-        echo "4. 彻底卸载本脚本 (删库跑路)"
+        print_title "脚本维护"
+        echo "1. 更新脚本 (v${SCRIPT_VERSION} -> Latest)"
+        echo "2. 卸载 Sing-box (及配置)"
+        echo "3. 卸载 Snell"
+        echo "4. 卸载 Fail2ban"
+        echo "5. 彻底卸载本脚本 (删库跑路)"
         echo "0. 返回"
         read -r -p "选: " c
         case $c in
-            1) systemctl stop sing-box; systemctl disable sing-box; rm -rf /etc/sing-box; rm -f /usr/bin/sing-box; log_success "Sing-box 已卸载"; press_any_key;;
-            2) systemctl stop snell; systemctl disable snell; rm -rf /etc/snell; rm -f /usr/local/bin/snell-server; rm -f /etc/systemd/system/snell.service; log_success "Snell 已卸载"; press_any_key;;
-            3) systemctl stop fail2ban; apt-get remove --purge -y fail2ban 2>/dev/null; rm -rf /etc/fail2ban; log_success "Fail2ban 已卸载"; press_any_key;;
-            4) 
+            1) update_script ;;
+            2) systemctl stop sing-box; systemctl disable sing-box; rm -rf /etc/sing-box; rm -f /usr/bin/sing-box; log_success "Sing-box 已卸载"; press_any_key;;
+            3) systemctl stop snell; systemctl disable snell; rm -rf /etc/snell; rm -f /usr/local/bin/snell-server; rm -f /etc/systemd/system/snell.service; log_success "Snell 已卸载"; press_any_key;;
+            4) systemctl stop fail2ban; apt-get remove --purge -y fail2ban 2>/dev/null; rm -rf /etc/fail2ban; log_success "Fail2ban 已卸载"; press_any_key;;
+            5) 
                 if confirm "确定要删除脚本吗？"; then
                     rm -f "$INSTALL_PATH"
                     log_success "脚本已删除，江湖路远，有缘再见！"
@@ -833,7 +835,7 @@ main_menu() {
         echo
         echo -e "${YELLOW}--- 其他 ---${NC}"
         echo "5. Docker 管理"
-        echo "6. 卸载管理"
+        echo "6. 脚本维护 (更新/卸载)"
         echo "0. 退出"
         
         echo
@@ -852,7 +854,7 @@ main_menu() {
                 case $s in 1) bbr_menu;; 2) network_tools_menu;; esac
                 ;;
             5) manage_docker ;;
-            6) uninstall_menu ;;
+            6) script_maintenance_menu ;;
             0) exit 0 ;;
             *) log_error "无效"; press_any_key ;;
         esac
