@@ -151,6 +151,27 @@ update_script() {
     exec "$INSTALL_PATH"
 }
 
+install_self() {
+    # 如果已安装且当前运行的就是安装路径下的脚本，跳过
+    if [[ -f "$INSTALL_PATH" && "$0" == "$INSTALL_PATH" ]]; then return; fi
+
+    print_line
+    log_info "正在安装/更新脚本到系统..."
+    
+    # 尝试判断是否为本地文件运行
+    if [[ -f "$0" ]]; then
+        cp "$0" "$INSTALL_PATH"
+    else
+        # 管道模式，必须下载
+        curl -sL "$GITHUB_RAW_URL" -o "$INSTALL_PATH"
+    fi
+    
+    chmod +x "$INSTALL_PATH"
+    log_success "安装完成！快捷指令: vps"
+    print_line
+    sleep 1
+}
+
 # ==================== 2. 系统管理模块 ====================
 
 system_update() {
@@ -821,5 +842,5 @@ main_menu() {
 
 check_root
 detect_os
-# [ -f "$INSTALL_PATH" ] || cp "$0" "$INSTALL_PATH" 2>/dev/null 
+install_self
 main_menu
