@@ -17,7 +17,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_VERSION="4.5.0"
-GITHUB_RAW_URL="https://raw.githubusercontent.com/your-username/vps-toolkit/main/vps.sh"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/GLH08/Script/main/vps.sh"
 INSTALL_PATH="/usr/local/bin/vps"
 CERT_DIR="/etc/vps/cert"
 SB_CONFIG="/etc/sing-box/config.json"
@@ -821,5 +821,5 @@ main_menu() {
 
 check_root
 detect_os
-[ -f "$INSTALL_PATH" ] || cp "$0" "$INSTALL_PATH" 2>/dev/null 
+# [ -f "$INSTALL_PATH" ] || cp "$0" "$INSTALL_PATH" 2>/dev/null 
 main_menu
