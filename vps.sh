@@ -42,7 +42,17 @@ confirm() {
 press_any_key() {
     echo
     echo -n "按任意键继续..."
-    read -rsn1
+    
+    # 清空输入缓存 (尝试读取所有待处理的输入，设置极短超时)
+    read -t 0.1 -n 10000 discard 2>/dev/null || true
+    
+    # 读取单个按键
+    read -rsn1 key 2>/dev/null || true
+    
+    # 如果是转义序列(如方向键)，尝试读取剩余部分并丢弃
+    if [[ "$key" == $'\x1b' ]]; then
+        read -rsn2 -t 0.1 discard 2>/dev/null || true
+    fi
     echo
 }
 
