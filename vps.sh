@@ -259,30 +259,49 @@ system_maintenance_menu() {
 # ==================== 3. 安全与 SSH 模块 ====================
 
 install_fail2ban() {
-    print_title "Fail2ban 管理"
-    echo "1. 安装启用 2. 查看封禁 3. 解封IP 4. 卸载 0. 返回"
+    print_title "Fail2ban 管理 (增强版)"
+    echo "1. 安装启用 (自动适配SSH端口)"
+    echo "2. 查看封禁状态"
+    echo "3. 解封指定 IP"
+    echo "4. 修改配置文件 (vim)"
+    echo "5. 卸载 Fail2ban"
+    echo "0. 返回"
     read -r -p "选: " c
     case $c in
-        1) install_pkg fail2ban; cat > /etc/fail2ban/jail.local <<EOF
-[DEFAULT]
-ignoreip = 127.0.0.1/8
-bantime  = 86400
-findtime = 600
-maxretry = 5
-
+        1) 
+            log_info "正在安装 Fail2ban & rsyslog..."
+            install_pkg fail2ban
+            install_pkg rsyslog
+            systemctl enable rsyslog; systemctl start rsyslog
+            
+            # 自动检测 SSH 端口
+            local ssh_port=$(grep "^Port" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+            [[ -z "$ssh_port" ]] && ssh_port=22
+            log_info "检测到 SSH 端口: $ssh_port"
+            
+            cat > /etc/fail2ban/jail.local <<EOF
 [sshd]
+ignoreip = 127.0.0.1/8
 enabled = true
-port    = ssh
-logpath = %(sshd_log)s
-backend = %(sshd_backend)s
+filter = sshd
+port = $ssh_port
+maxretry = 5
+findtime = 300
+bantime = 600
+action = %(action_)s[port="%(port)s", protocol="%(protocol)s", logpath="%(logpath)s", chain="%(chain)s"]
+banaction = iptables-multiport
+logpath = /var/log/auth.log
 EOF
-           systemctl enable fail2ban; systemctl restart fail2ban; log_success "启用成功";;
-        2) fail2ban-client status sshd;;
-        3) read -r -p "IP: " ip; fail2ban-client set sshd unbanip "$ip";;
-        4) systemctl stop fail2ban; apt-get remove --purge -y fail2ban 2>/dev/null || yum remove -y fail2ban 2>/dev/null; rm -rf /etc/fail2ban; log_success "已卸载";;
+           systemctl enable fail2ban; systemctl restart fail2ban
+           log_success "Fail2ban 已启用 (监控端口: $ssh_port)"
+           press_any_key
+           ;;
+        2) fail2ban-client status sshd; press_any_key ;;
+        3) read -r -p "要解封的 IP: " ip; fail2ban-client set sshd unbanip "$ip"; press_any_key ;;
+        4) vim /etc/fail2ban/jail.local; systemctl restart fail2ban; log_success "配置已更新并重启服务"; press_any_key ;;
+        5) systemctl stop fail2ban; apt-get remove --purge -y fail2ban 2>/dev/null || yum remove -y fail2ban 2>/dev/null; rm -rf /etc/fail2ban; log_success "已卸载"; press_any_key ;;
         0) return;;
     esac
-    press_any_key
 }
 
 manage_ssh() {
