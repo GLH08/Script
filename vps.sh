@@ -241,16 +241,148 @@ manage_swap() {
     press_any_key
 }
 
+# ==================== 2.1 基础运维功能 (小白必备) ====================
+
+sync_time() {
+    log_info "正在同步系统时间..."
+    install_pkg ntpdate
+    if ntpdate -u pool.ntp.org; then
+        log_success "时间同步成功: $(date)"
+    else
+        log_warn "NTP同步失败，尝试使用 timedatectl..."
+        timedatectl set-ntp true 2>/dev/null
+        log_info "当前时间: $(date)"
+    fi
+    press_any_key
+}
+
+set_dns() {
+    print_title "DNS 优选设置"
+    echo "1. Google DNS (8.8.8.8)"
+    echo "2. Cloudflare DNS (1.1.1.1)"
+    echo "3. 阿里 DNS (223.5.5.5)"
+    echo "4. 恢复系统默认"
+    echo "0. 返回"
+    read -r -p "请选择: " dns_c
+    
+    local dns_ip=""
+    case $dns_c in
+        1) dns_ip="8.8.8.8" ;;
+        2) dns_ip="1.1.1.1" ;;
+        3) dns_ip="223.5.5.5" ;;
+        4) echo "" > /etc/resolv.conf; log_info "已清空手动配置，重启可能恢复默认"; press_any_key; return ;;
+        *) return ;;
+    esac
+    
+    if [[ -n "$dns_ip" ]]; then
+        if [[ -f /etc/resolv.conf ]]; then
+             cp /etc/resolv.conf /etc/resolv.conf.bak
+        fi
+        echo "nameserver $dns_ip" > /etc/resolv.conf
+        echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+        log_success "DNS 已设置为: $dns_ip"
+        log_info "备份已保存至 /etc/resolv.conf.bak"
+    fi
+    press_any_key
+}
+
+kill_port() {
+    read -r -p "请输入要释放的端口号 (如 80): " kp
+    if [[ ! "$kp" =~ ^[0-9]+$ ]]; then log_error "请输入有效数字"; press_any_key; return; fi
+    
+    local pid=""
+    if command -v lsof &>/dev/null; then
+        pid=$(lsof -t -i:$kp)
+    elif command -v ss &>/dev/null; then
+        if command -v fuser &>/dev/null; then
+            pid=$(fuser $kp/tcp 2>/dev/null)
+        fi
+    fi
+    
+    if [[ -z "$pid" ]] && command -v netstat &>/dev/null; then
+        pid=$(netstat -nlp | grep ":$kp " | awk '{print $7}' | cut -d/ -f1)
+    fi
+
+    if [[ -n "$pid" ]]; then
+        kill -9 $pid
+        log_success "已强制结束占用端口 $kp 的进程 (PID: $pid)"
+    else
+        log_warn "未找到占用端口 $kp 的进程，或者工具缺失 (建议先运行'安装常用网络工具'或手动检查)"
+    fi
+    press_any_key
+}
+
+enable_root() {
+    if confirm "此操作将允许 Root 用户通过密码直接登录 SSH，是否继续？"; then
+        log_info "正在修改 SSH 配置..."
+        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+        
+        systemctl restart sshd
+        log_success "SSH 服务已重启，Root 登录已开启！"
+        echo -e "${YELLOW}建议立即修改 Root 密码以保证安全 (运行 'passwd root')${NC}"
+    fi
+    press_any_key
+}
+
+sys_optimize() {
+    log_info "正在优化系统文件打开数限制 (ulimit)..."
+    if grep -q "soft nofile" /etc/security/limits.conf; then
+        sed -i 's/soft nofile.*/soft nofile 65535/' /etc/security/limits.conf
+        sed -i 's/hard nofile.*/hard nofile 65535/' /etc/security/limits.conf
+    else
+        echo "* soft nofile 65535" >> /etc/security/limits.conf
+        echo "* hard nofile 65535" >> /etc/security/limits.conf
+    fi
+    
+    if ! grep -q "ulimit -n 65535" /etc/profile; then
+        echo "ulimit -n 65535" >> /etc/profile
+    fi
+    
+    log_success "优化完成！请断开 SSH 重新登录以生效。"
+    press_any_key
+}
+
+install_essential_tools() {
+    log_info "正在安装常用工具包 (请耐心等待)..."
+    case $PACKAGE_MANAGER in
+        apt-get) apt-get update -y ;;
+        yum) yum makecache ;;
+        apk) apk update ;;
+    esac
+    
+    local tool_list="wget curl vim nano unzip zip tar net-tools htop git screen lsof socat"
+    for tool in $tool_list; do
+        install_pkg "$tool"
+    done
+    
+    log_success "常用工具安装完成！"
+    press_any_key
+}
+
 system_maintenance_menu() {
     while true; do
-        print_title "系统维护"
-        echo "1. 清理日志"
-        echo "2. IPv4 优先"
-        echo "0. 返回"
-        read -r -p "选: " choice
+        print_title "系统维护 & 小白运维工具"
+        echo "1.  系统清理 (Logs/Cache)"
+        echo "2.  设置 IPv4 优先 (解决访问慢)"
+        print_line
+        echo "3.  ⏳ 强制时间同步 (修复节点连不上)"
+        echo "4.  📡 修改系统 DNS (修复无法解析)"
+        echo "5.  ✂️ 端口占用释放 (修复 启动失败)"
+        echo "6.  🔓 开启 Root 登录 (修复 权限/SFTP)"
+        echo "7.  🚀 优化系统参数 (提升并发性能)"
+        echo "8.  🛠️ 安装常用工具 (Ping/Vim/Unzip...)"
+        echo "0.  返回"
+        read -r -p "请选择: " choice
         case $choice in
             1) journalctl --vacuum-time=1d >/dev/null 2>&1; rm -rf /var/log/*.gz /var/log/*.[0-9]; echo > /var/log/syslog; echo > /var/log/auth.log; log_success "清理完成"; press_any_key ;;
             2) sed -i 's/#precedence ::ffff:0:0\/96  100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf; log_success "已设置"; press_any_key ;;
+            3) sync_time ;;
+            4) set_dns ;;
+            5) kill_port ;;
+            6) enable_root ;;
+            7) sys_optimize ;;
+            8) install_essential_tools ;;
             0) return ;;
         esac
     done
