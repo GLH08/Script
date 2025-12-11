@@ -817,8 +817,31 @@ network_tools_menu() {
 # --- BBR Module (Ported from bbr.sh) ---
 
 get_bbr_version() {
-    if [[ -f /lib/modules/$(uname -r)/modules.dep ]]; then
-        modinfo tcp_bbr 2>/dev/null | grep "^version:" | awk '{print $2}'
+    # 尝试加载模块 (如果未加载)
+    modprobe tcp_bbr >/dev/null 2>&1
+    
+    # 1. 尝试从 sysfs 获取 (最准)
+    if [[ -f /sys/module/tcp_bbr/version ]]; then
+        cat /sys/module/tcp_bbr/version
+        return
+    fi
+    
+    # 2. 尝试 modinfo (旧方法，适用于某些第三方内核)
+    local mod_ver=""
+    if command -v modinfo &>/dev/null; then
+        mod_ver=$(modinfo tcp_bbr 2>/dev/null | grep "^version:" | awk '{print $2}')
+    fi
+    
+    if [[ -n "$mod_ver" ]]; then
+        echo "$mod_ver"
+        return
+    fi
+    
+    # 3. 检查内核是否内置支持
+    if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr"; then
+        echo "Default (Kernel Internal)"
+    else
+        echo "Unknown / Not Installed"
     fi
 }
 
@@ -869,6 +892,15 @@ enable_bbr_algo() {
     local algo=$1
     local qdisc=$2
     local sysctl_conf="/etc/sysctl.d/99-vps-toolkit.conf"
+    
+    # 检查算法是否可用
+    if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "$algo"; then
+        modprobe "tcp_$algo" >/dev/null 2>&1
+        if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "$algo"; then
+            log_error "当前内核不支持 $algo 算法！请尝试安装 BBR Plus/v3 内核。"
+            return
+        fi
+    fi
     
     echo "net.core.default_qdisc=$qdisc" > "$sysctl_conf"
     echo "net.ipv4.tcp_congestion_control=$algo" >> "$sysctl_conf"
