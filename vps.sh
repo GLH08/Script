@@ -57,7 +57,36 @@ show_sys_status() {
     
     # CPU Load
     local load=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
-    local cpu_usage=$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage "%"}' | cut -d. -f1)
+    local load=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
+    
+    # CPU Usage (Dynamic)
+    local cpu_usage="0"
+    if [[ -f /proc/stat ]]; then
+        local stat1=$(grep 'cpu ' /proc/stat)
+        sleep 0.1
+        local stat2=$(grep 'cpu ' /proc/stat)
+        
+        # Parse stat1
+        local user1=$(echo "$stat1" | awk '{print $2}')
+        local nice1=$(echo "$stat1" | awk '{print $3}')
+        local sys1=$(echo "$stat1" | awk '{print $4}')
+        local idle1=$(echo "$stat1" | awk '{print $5}')
+        local total1=$((user1 + nice1 + sys1 + idle1))
+        
+        # Parse stat2
+        local user2=$(echo "$stat2" | awk '{print $2}')
+        local nice2=$(echo "$stat2" | awk '{print $3}')
+        local sys2=$(echo "$stat2" | awk '{print $4}')
+        local idle2=$(echo "$stat2" | awk '{print $5}')
+        local total2=$((user2 + nice2 + sys2 + idle2))
+        
+        local diff_total=$((total2 - total1))
+        local diff_idle=$((idle2 - idle1))
+        
+        if (( diff_total > 0 )); then
+            cpu_usage=$(( (diff_total - diff_idle) * 100 / diff_total ))
+        fi
+    fi
     
     # Memory
     local mem_total=$(free -m | awk '/Mem:/ {print $2}')
@@ -276,8 +305,14 @@ sync_time() {
         install_pkg chrony
     fi
     
-    systemctl enable chrony &>/dev/null
-    systemctl restart chrony
+    # Detect service name (chrony or chronyd)
+    local chrony_svc="chrony"
+    if systemctl list-unit-files --type=service | grep -q "^chronyd.service"; then
+        chrony_svc="chronyd"
+    fi
+    
+    systemctl enable "$chrony_svc" &>/dev/null
+    systemctl restart "$chrony_svc"
     
     # 强制同步
     if command -v chronyc &>/dev/null; then
@@ -371,16 +406,17 @@ sys_optimize() {
     cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%F-%H%M) 2>/dev/null
     cp /etc/security/limits.conf /etc/security/limits.conf.bak.$(date +%F-%H%M) 2>/dev/null
     
-    # 2. 系统资源限制 (ulimit)
-    sed -i '/^# End of file/,$d' /etc/security/limits.conf
+    # 2. 系统资源限制 (ulimit) - 幂等处理
+    sed -i '/# VPS-Toolkit-Limits-Start/,/# VPS-Toolkit-Limits-End/d' /etc/security/limits.conf
     cat >> /etc/security/limits.conf <<EOF
-# End of file
+# VPS-Toolkit-Limits-Start
 * soft nofile 1048576
 * hard nofile 1048576
 * soft nproc 1048576
 * hard nproc 1048576
 root soft nofile 1048576
 root hard nofile 1048576
+# VPS-Toolkit-Limits-End
 EOF
     if ! grep -q "ulimit -n 1048576" /etc/profile; then
         echo "ulimit -n 1048576" >> /etc/profile
