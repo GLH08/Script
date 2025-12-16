@@ -501,8 +501,28 @@ change_language_cn() {
     
     if [[ -f /etc/locale.gen ]]; then
         log_info "正在配置语言环境..."
+        
+        # 1. 确保 zh_CN.UTF-8 被启用
+        # 如果存在注释行，取消注释
         sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen
-        locale-gen
+        
+        # 如果文件中根本没有这行 (grep 找不到已启用的)，则追加
+        if ! grep -q "^zh_CN.UTF-8 UTF-8" /etc/locale.gen; then
+            echo "zh_CN.UTF-8 UTF-8" >> /etc/locale.gen
+        fi
+        
+        # 2. 生成区域
+        log_info "正在生成区域文件..."
+        locale-gen zh_CN.UTF-8 || locale-gen
+        
+        # 3. 验证是否生成成功
+        if ! locale -a | grep -i "zh_CN"; then
+             log_error "中文区域 (zh_CN) 生成失败！可能系统不支持或文件修改失败。"
+             press_any_key
+             return
+        fi
+
+        # 4. 应用设置
         update-locale LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:zh LC_ALL=zh_CN.UTF-8
         
         log_success "系统语言已修改为中文 (zh_CN.UTF-8)"
