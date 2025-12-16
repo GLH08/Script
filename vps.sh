@@ -661,11 +661,25 @@ EOF
 }
 
 check_bbr_status() {
-    local bbr_ver=$(modinfo tcp_bbr 2>/dev/null | grep "^version" | awk '{print $2}')
-    local algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-    local qdisc=$(sysctl net.core.default_qdisc | awk '{print $3}')
+    local kernel_ver=$(uname -r)
+    local bbr_ver=""
     
-    echo -e "内核模块版本: ${GREEN}${bbr_ver:-未知}${NC}"
+    # Try to load module first if possible
+    modprobe tcp_bbr &>/dev/null
+    
+    if command -v modinfo &>/dev/null; then
+        bbr_ver=$(modinfo tcp_bbr 2>/dev/null | grep "^version" | awk '{print $2}')
+    fi
+    
+    local algo=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
+    local qdisc=$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')
+    
+    echo -e "当前内核版本: ${GREEN}${kernel_ver}${NC}"
+    if [[ -n "$bbr_ver" ]]; then
+        echo -e "BBR 模块版本: ${GREEN}${bbr_ver}${NC}"
+    else
+        echo -e "BBR 模块版本: ${YELLOW}系统自带 (或检测失败)${NC}"
+    fi
     echo -e "当前拥塞控制: ${GREEN}${algo:-未知}${NC}"
     echo -e "当前队列管理: ${GREEN}${qdisc:-未知}${NC}"
 }
