@@ -546,6 +546,7 @@ system_maintenance_menu() {
         echo "7.  🚀 优化系统参数 (提升并发性能)"
         echo "8.  🛠️ 安装常用工具 (Ping/Vim/Unzip...)"
         echo "9.  🇨🇳 修改系统语言为中文"
+        echo "10. 🕒 修改系统时区 (修复时间都不对)"
         echo "0.  返回"
         read -r -p "请选择: " choice
         case $choice in
@@ -558,6 +559,7 @@ system_maintenance_menu() {
             7) sys_optimize ;;
             8) install_essential_tools ;;
             9) change_language_cn ;;
+            10) set_timezone ;;
             0) return ;;
         esac
     done
