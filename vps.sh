@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# VPS ToolKit v6.0 (Ultimate Consolidation)
+# VPS ToolKit v6.0.2 (Ultimate Consolidation)
 # 
 # 整合功能：
-# 1. 基础系统初始化 & 安全加固
+# 1. 基础系统初始化 (Granular)
 # 2. 多协议节点部署 (VLESS/Hy2/SS2022/Snell)
 # 3. 节点格式导出 (Loon/Sing-box/Standard)
 # 4. 开发工具集 (GHCR Creds, Docker, Acme)
@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-SCRIPT_VERSION="6.0.1"
+SCRIPT_VERSION="6.0.2"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/GLH08/Script/main/vps.sh"
 INSTALL_PATH="/usr/local/bin/vps"
 SB_CONFIG="/etc/sing-box/config.json"
@@ -82,37 +82,71 @@ allow_port() {
     fi
 }
 
-# ==================== 系统初始化 ====================
+# ==================== 系统初始化 (Granular) ====================
 
-system_init() {
-    if ! confirm_action "执行系统初始化 (更新+时区+Swap+Docker凭据支持)"; then return; fi
-    
-    log_info "1. 更新系统软件包..."
+sys_update() {
+    log_info "更新系统软件包..."
     case $PKG_MGR in
         apt-get) apt-get update && apt-get upgrade -y ;;
         yum) yum update -y ;;
         apk) apk update && apk upgrade ;;
     esac
-    
-    log_info "2. 安装基础工具..."
+    log_success "系统已更新"
+    read -r -p "按任意键返回..."
+}
+
+sys_install_tools() {
+    log_info "安装基础工具 (curl, wget, vim, git, socat...)"
     $INSTALL curl wget vim nano unzip zip tar git jq socat chrony iproute2 pass gnupg2
-    
-    log_info "3. 设置时区 (Asia/Shanghai)..."
+    log_success "工具安装完成"
+    read -r -p "按任意键返回..."
+}
+
+sys_timezone() {
+    log_info "设置时区为 Asia/Shanghai"
     timedatectl set-timezone Asia/Shanghai 2>/dev/null || ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-    
-    log_info "4. 检查/创建 Swap..."
-    if [[ $(free -m | awk '/Swap/ {print $2}') -eq 0 ]]; then
+    log_success "时区已设置: $(date)"
+    read -r -p "按任意键返回..."
+}
+
+sys_swap() {
+    if [[ $(free -m | awk '/Swap/ {print $2}') -ne 0 ]]; then
+        log_warn "Swap 已存在，无需创建。"
+    else
         local mem=$(free -m | awk '/Mem:/ {print $2}')
         local size=2048; [[ $mem -gt 4096 ]] && size=4096
+        log_info "创建 ${size}MB Swap..."
         dd if=/dev/zero of=/swapfile bs=1M count=$size status=none
         chmod 600 /swapfile; mkswap /swapfile; swapon /swapfile
         echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
-        log_success "Swap 创建完成: ${size}MB"
+        log_success "Swap 创建完成"
     fi
-    
-    check_ghcr_creds_support # Auto-check if we can prep GHCR env
-    
-    log_success "系统初始化完成"
+    read -r -p "按任意键返回..."
+}
+
+menu_system() {
+    while true; do
+        print_title "系统初始化"
+        echo " 1. 更新系统 (Update & Upgrade)"
+        echo " 2. 安装必备工具 (Tools)"
+        echo " 3. 设置时区 (Asia/Shanghai)"
+        echo " 4. 开启虚拟内存 (Swap)"
+        echo " 5. 一键执行所有初始化"
+        echo " 0. 返回"
+        read -r -p "选: " c
+        case $c in
+            1) sys_update ;;
+            2) sys_install_tools ;;
+            3) sys_timezone ;;
+            4) sys_swap ;;
+            5) 
+                if confirm_action "执行所有初始化步骤"; then
+                    sys_update; sys_install_tools; sys_timezone; sys_swap
+                fi
+                ;;
+            0) return ;;
+        esac
+    done
 }
 
 # ==================== 高级工具集 ====================
@@ -125,6 +159,8 @@ install_ghcr_creds() {
     if ! confirm_action "安装 Docker Credential Pass ?"; then return; fi
     
     # 1. 依赖已在 init 中安装 (pass, gnupg2)
+    # Ensure installed just in case
+    $INSTALL pass gnupg2 >/dev/null
     
     # 2. 生成 GPG Key
     if ! gpg --list-secret-keys --with-colons | grep -q "^sec"; then
@@ -167,11 +203,6 @@ EOF
     log_success "GHCR 凭据助手配置完成！"
     echo -e "${YELLOW}提示: 请运行 'docker login ghcr.io' 登录，凭据将被加密存储。${NC}"
     read -r -p "按任意键返回..."
-}
-
-check_ghcr_creds_support() {
-    # Helper to quiet pre-install during init if needed, currently manual trigger is better
-    :
 }
 
 # ==================== 节点部署核心 ====================
@@ -365,8 +396,6 @@ EOF
     read -r -p "按任意键返回..."
 }
 
-# ==================== 菜单逻辑 ====================
-
 # ==================== 管理功能 ====================
 
 list_status() {
@@ -431,15 +460,114 @@ uninstall_node() {
     read -r -p "按任意键返回..."
 }
 
+# --- Legacy/CDN Protocols ---
+deploy_ws_tls() {
+    print_title "部署 WS + TLS (CDN常用)"
+    echo " 1. VLESS + WS + TLS"
+    echo " 2. VMess + WS + TLS"
+    echo " 3. Trojan + WS + TLS"
+    echo " 0. 返回"
+    read -r -p "选: " c
+    local proto=""
+    case $c in
+        1) proto="vless" ;;
+        2) proto="vmess" ;;
+        3) proto="trojan" ;;
+        *) return ;;
+    esac
+
+    read -r -p "域名 (已解析到本机): " domain
+    [[ -z "$domain" ]] && return
+    read -r -p "端口 [443]: " port
+    [[ -z "$port" ]] && port=443
+    
+    allow_port $port
+    acme_cert "$domain" # Helper to get cert
+    
+    local uuid=$(sing-box generate uuid)
+    local user_part=""
+    if [[ "$proto" == "trojan" ]]; then 
+        user_part='"users": [{"password": "'$uuid'"}]'
+    elif [[ "$proto" == "vmess" ]]; then 
+        user_part='"users": [{"uuid": "'$uuid'", "alterId": 0}]'
+    else 
+        user_part='"users": [{"uuid": "'$uuid'"}]'
+    fi
+    
+    local json='{
+        "type": "'$proto'", "tag": "'$proto'-ws-'$port'", "listen": "::", "listen_port": '$port',
+        '$user_part',
+        "tls": { "enabled": true, "server_name": "'$domain'", "certificate_path": "'$CERT_DIR'/'$domain'.pem", "key_path": "'$CERT_DIR'/'$domain'.key" },
+        "transport": { "type": "ws", "path": "/" }
+    }'
+    
+    if add_sb_inbound "$proto-ws-$port" "$json"; then
+        echo; echo -e "${YELLOW}=== 通用分享链接 ===${NC}"
+        # Simple Logic for link generation (omitted for brevity, can be added if needed)
+        echo "已部署。请使用客户端添加 $proto (WS+TLS) 配置。"
+        echo "UUID/Password: $uuid"
+        echo "Path: /"
+    fi
+    read -r -p "按任意键返回..."
+}
+
+# ==================== Fail2ban 管理 ====================
+
+fail2ban_menu() {
+    while true; do
+        print_title "Fail2ban 安全中心"
+        local status="未运行"
+        if systemctl is-active fail2ban &>/dev/null; then status="${GREEN}运行中${NC}"; else status="${RED}停止${NC}"; fi
+        echo -e "状态: $status"
+        echo
+        echo " 1. 安装/重置 Fail2ban (SSHD防爆破)"
+        echo " 2. 查看拦截记录 (Jailed IP)"
+        echo " 3. 解封 IP (Unban)"
+        echo " 4. 查看日志 (Last 50)"
+        echo " 5. 修改配置 (vi jail.local)"
+        echo " 0. 返回"
+        read -r -p "选: " c
+        case $c in
+            1) 
+                if confirm_action "安装配置 Fail2ban"; then
+                    $INSTALL fail2ban
+                    # Detect SSH Port
+                    local ssh_port=$(grep "^Port" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+                    [[ -z "$ssh_port" ]] && ssh_port=22
+                    cat > /etc/fail2ban/jail.local <<EOF
+[sshd]
+enabled=true
+port=$ssh_port
+bantime=1h
+findtime=10m
+maxretry=5
+EOF
+                    systemctl restart fail2ban && systemctl enable fail2ban
+                    log_success "已启动监控端口: $ssh_port"
+                fi ;;
+            2) fail2ban-client status sshd ;;
+            3) 
+                read -r -p "输入要解封的IP: " ip
+                fail2ban-client set sshd unbanip "$ip" && log_success "已解封" ;;
+            4) journalctl -u fail2ban -n 50 --no-pager ;;
+            5) vim /etc/fail2ban/jail.local && systemctl restart fail2ban ;;
+            0) return ;;
+        esac
+        read -r -p "按任意键继续..."
+    done
+}
+
 menu_nodes() {
     while true; do
         print_title "节点部署"
-        echo " 1. VLESS + Reality + Vision"
-        echo " 2. Hysteria2 (自签证书)"
-        echo " 3. SS2022 + ShadowTLS (Sing-box)"
-        echo " 4. Snell v4/v5"
-        echo " 5. 查看配置/日志"
-        echo " 6. 卸载节点"
+        echo " 1. VLESS + Reality + Vision (推荐)"
+        echo " 2. Hysteria2 (极速/UDP)"
+        echo " 3. SS2022 + ShadowTLS (抗封锁)"
+        echo " 4. Snell v4/v5 (Loon/Surge专用)"
+        echo " 5. Legacy WS+TLS (CDN/兼容)"
+        print_line
+        echo " 8. 查看配置/状态"
+        echo " 9. 卸载节点"
         echo " 0. 返回"
         read -r -p "选: " c
         case $c in
@@ -447,8 +575,9 @@ menu_nodes() {
             2) deploy_hy2 ;;
             3) deploy_ss2022_stls ;;
             4) deploy_snell ;;
-            5) list_status ;;
-            6) uninstall_node ;;
+            5) deploy_ws_tls ;;
+            8) list_status ;;
+            9) uninstall_node ;;
             0) return ;;
         esac
     done
@@ -457,23 +586,46 @@ menu_nodes() {
 menu_tools() {
     while true; do
         print_title "高级工具"
-        echo " 1. 配置 GHCR/Docker 凭据助手 (setup-docker-credential)"
-        echo " 2. 开放防火墙端口 (Helper)"
-        echo " 3. 开启 BBR"
-        echo " 4. 更新本脚本"
+        echo " 1. 配置 GHCR/Docker 凭据助手"
+        echo " 2. Fail2ban 安全管理 (防爆破)"
+        echo " 3. 查看端口占用"
+        echo " 4. 开启 BBR"
         echo " 0. 返回"
         read -r -p "选: " c
         case $c in
             1) install_ghcr_creds ;;
-            2) read -r -p "端口: " p; allow_port "$p" ;;
+            2) fail2ban_menu ;;
             3) 
-                echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-bbr.conf
-                echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
-                sysctl --system; log_success "BBR Set" ;;
-            4) curl -sL "$GITHUB_RAW_URL" -o "$INSTALL_PATH"; chmod +x "$INSTALL_PATH"; exec "$INSTALL_PATH" ;;
+                print_title "端口占用情况 (TCP/UDP)"
+                ss -tulpn | grep LISTEN | awk '{print $1, $5, $7}' | column -t
+                echo
+                read -r -p "按任意键返回..." ;;
+            4) 
+                if confirm_action "开启 BBR 加速"; then
+                    echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-bbr.conf
+                    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
+                    sysctl --system; log_success "BBR 已开启"
+                fi ;;
             0) return ;;
         esac
     done
+}
+
+menu_script() {
+    print_title "脚本管理"
+    echo " 1. 更新脚本 (Update)"
+    echo " 2. 卸载脚本 (Uninstall)"
+    echo " 0. 返回"
+    read -r -p "选: " c
+    case $c in
+        1) 
+            if confirm_action "更新脚本至最新版"; then
+                curl -sL "$GITHUB_RAW_URL" -o "$INSTALL_PATH"; chmod +x "$INSTALL_PATH"; exec "$INSTALL_PATH"
+            fi ;;
+        2) 
+            if confirm_action "永久删除脚本"; then rm -f "$INSTALL_PATH"; exit 0; fi ;;
+        0) return ;;
+    esac
 }
 
 main_menu() {
@@ -481,18 +633,18 @@ main_menu() {
         print_title "VPS ToolKit v${SCRIPT_VERSION}"
         echo -e "System: $OS $ARCH | IP: $(get_public_ip)"
         echo
-        echo " 1. 🟢 系统初始化 (System Init)"
-        echo " 2. 🚀 节点部署 (Node Deploy)"
-        echo " 3. 🔧 高级工具 (Tools: GHCR, Firewall...)"
-        echo " 4. 🗑️  卸载脚本"
+        echo " 1. 🟢 系统初始化 (Init)"
+        echo " 2. 🚀 节点部署 (Deploy)"
+        echo " 3. 🔧 高级工具 (Tools)"
+        echo " 4. � 脚本管理 (Update/Uninstall)"
         echo " 0. 退出"
         echo
         read -r -p "请选择: " c
         case $c in
-            1) system_init ;;
+            1) menu_system ;;
             2) menu_nodes ;;
             3) menu_tools ;;
-            4) rm -f "$INSTALL_PATH"; exit 0 ;;
+            4) menu_script ;;
             0) exit 0 ;;
         esac
     done
