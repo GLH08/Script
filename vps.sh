@@ -51,12 +51,13 @@ check_port() {
     fi
 }
 
-# 增强: 系统状态仪表盘
+# 增强: 系统状态仪表盘 (v4.5 Pro)
 show_sys_status() {
     local start_time=$(date +%s)
     
     # CPU Load
     local load=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
+    local cpu_usage=$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage "%"}' | cut -d. -f1)
     
     # Memory
     local mem_total=$(free -m | awk '/Mem:/ {print $2}')
@@ -71,12 +72,34 @@ show_sys_status() {
     # TCP Connections
     local tcp_est=$(ss -t state established 2>/dev/null | tail -n +2 | wc -l)
     local tcp_tot=$(ss -s 2>/dev/null | awk '/TCP:/ {print $2}')
+
+    # Docker Status
+    local docker_status="${RED}未安装${NC}"
+    if command -v docker &>/dev/null; then
+        if systemctl is-active docker &>/dev/null; then
+            local container_count=$(docker ps -q 2>/dev/null | wc -l)
+            docker_status="${GREEN}运行中 (容器: $container_count)${NC}"
+        else
+            docker_status="${YELLOW}已停止${NC}"
+        fi
+    fi
+
+    # BBR Status
+    local bbr_status="${RED}未启用${NC}"
+    local cc_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    local qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    if [[ "$cc_algo" == "bbr" ]]; then
+        bbr_status="${GREEN}BBR + $qdisc${NC}"
+    fi
     
-    echo -e "${CYAN}系统状态:${NC}"
-    echo -e "CPU负载: ${GREEN}$load${NC} | TCP连接: ${GREEN}${tcp_est}${NC} Est / ${GREEN}${tcp_tot}${NC} Tot"
-    echo -e "内存使用: ${GREEN}${mem_used}MB / ${mem_total}MB (${mem_rate}%)${NC}"
-    echo -e "磁盘使用: ${GREEN}${disk_used} / ${disk_total} (${disk_rate})${NC}"
-    print_line
+    echo -e "${CYAN}┌── 系统状态概览 ──────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│${NC} CPU负载 : ${GREEN}$load${NC} | 使用率: ${GREEN}${cpu_usage}%${NC}"
+    echo -e "${CYAN}│${NC} 内存使用: ${GREEN}${mem_used}MB / ${mem_total}MB (${mem_rate}%)${NC}"
+    echo -e "${CYAN}│${NC} 磁盘使用: ${GREEN}${disk_used} / ${disk_total} (${disk_rate})${NC}"
+    echo -e "${CYAN}│${NC} TCP连接 : ${GREEN}${tcp_est}${NC} Est / ${GREEN}${tcp_tot}${NC} Tot"
+    echo -e "${CYAN}│${NC} Docker  : $docker_status"
+    echo -e "${CYAN}│${NC} BBR算法 : $bbr_status"
+    echo -e "${CYAN}└──────────────────────────────────────────────────────────┘${NC}"
 }
 
 confirm() {
@@ -244,13 +267,28 @@ manage_swap() {
 # ==================== 2.1 基础运维功能 (小白必备) ====================
 
 sync_time() {
-    log_info "正在同步系统时间..."
-    install_pkg ntpdate
-    if ntpdate -u pool.ntp.org; then
-        log_success "时间同步成功: $(date)"
+    log_info "正在使用 Chrony 同步系统时间..."
+    
+    # 停用冲突服务
+    systemctl stop systemd-timesyncd 2>/dev/null
+    
+    if ! command -v chronyd &>/dev/null; then
+        install_pkg chrony
+    fi
+    
+    systemctl enable chrony &>/dev/null
+    systemctl restart chrony
+    
+    # 强制同步
+    if command -v chronyc &>/dev/null; then
+        log_info "正在强制校准..."
+        chronyc makestep >/dev/null 2>&1
+        sleep 2
+        chronyc tracking
+        log_success "时间同步完成: $(date)"
     else
-        log_warn "NTP同步失败，尝试使用 timedatectl..."
-        timedatectl set-ntp true 2>/dev/null
+        log_warn "Chrony 可能未正确安装，尝试备用方案..."
+        ntpdate -u pool.ntp.org 2>/dev/null || timedatectl set-ntp true
         log_info "当前时间: $(date)"
     fi
     press_any_key
@@ -326,20 +364,73 @@ enable_root() {
 }
 
 sys_optimize() {
-    log_info "正在优化系统文件打开数限制 (ulimit)..."
-    if grep -q "soft nofile" /etc/security/limits.conf; then
-        sed -i 's/soft nofile.*/soft nofile 65535/' /etc/security/limits.conf
-        sed -i 's/hard nofile.*/hard nofile 65535/' /etc/security/limits.conf
-    else
-        echo "* soft nofile 65535" >> /etc/security/limits.conf
-        echo "* hard nofile 65535" >> /etc/security/limits.conf
-    fi
+    print_title "高级系统与网络优化"
+    log_info "正在进行深度网络调优 (BBR+FQ_CODEL+TFO)..."
     
-    if ! grep -q "ulimit -n 65535" /etc/profile; then
-        echo "ulimit -n 65535" >> /etc/profile
-    fi
+    # 1. 备份配置
+    cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%F-%H%M) 2>/dev/null
+    cp /etc/security/limits.conf /etc/security/limits.conf.bak.$(date +%F-%H%M) 2>/dev/null
     
-    log_success "优化完成！请断开 SSH 重新登录以生效。"
+    # 2. 系统资源限制 (ulimit)
+    sed -i '/^# End of file/,$d' /etc/security/limits.conf
+    cat >> /etc/security/limits.conf <<EOF
+# End of file
+* soft nofile 1048576
+* hard nofile 1048576
+* soft nproc 1048576
+* hard nproc 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+    if ! grep -q "ulimit -n 1048576" /etc/profile; then
+        echo "ulimit -n 1048576" >> /etc/profile
+    fi
+
+    # 3.不仅是 TCP 拥塞控制，还有内核网络参数全家桶
+    cat > /etc/sysctl.d/99-vps-toolkit.conf <<EOF
+# === VPS工具箱优化 $(date) ===
+fs.file-max = 1048576
+fs.inotify.max_user_instances = 8192
+
+# 网络核心
+net.core.somaxconn = 32768
+net.core.netdev_max_backlog = 32768
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+
+# TCP 缓冲区
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 16384 33554432
+
+# 连接优化
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65000
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_max_tw_buckets = 6000
+
+# 启用 BBR + FQ_CODEL
+net.core.default_qdisc = fq_codel
+net.ipv4.tcp_congestion_control = bbr
+
+# TCP Fast Open
+net.ipv4.tcp_fastopen = 3
+EOF
+
+    # 4. 应用 Sysctl
+    sysctl -p /etc/sysctl.d/99-vps-toolkit.conf >/dev/null 2>&1
+    
+    # 5. 尝试设置网卡队列 (需要 iproute2)
+    local interface=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1);exit}}}')
+    if [[ -n "$interface" ]] && command -v tc &>/dev/null; then
+        tc qdisc replace dev "$interface" root fq_codel 2>/dev/null
+        log_info "网卡 $interface 队列已设置为 fq_codel"
+    fi
+
+    log_success "优化完成！建议重启系统以确保所有变更生效。"
     press_any_key
 }
 
@@ -351,12 +442,38 @@ install_essential_tools() {
         apk) apk update ;;
     esac
     
-    local tool_list="wget curl vim nano unzip zip tar net-tools htop git screen lsof socat"
+    local tool_list="wget curl vim nano unzip zip tar net-tools iproute2 htop git screen lsof socat chrony"
     for tool in $tool_list; do
         install_pkg "$tool"
     done
     
     log_success "常用工具安装完成！"
+    press_any_key
+}
+
+change_language_cn() {
+    print_title "修改系统语言为中文"
+    
+    if [[ "$PACKAGE_MANAGER" != "apt-get" ]]; then
+        log_warn "此功能原生适配 Debian/Ubuntu，您的系统可能是 $OS"
+        if ! confirm "是否尝试强制执行？(可能会失败)"; then return; fi
+    fi
+
+    log_info "正在安装中文语言包 (locales)..."
+    apt-get update -y
+    install_pkg locales
+    
+    if [[ -f /etc/locale.gen ]]; then
+        log_info "正在配置语言环境..."
+        sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen
+        locale-gen
+        update-locale LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:zh LC_ALL=zh_CN.UTF-8
+        
+        log_success "系统语言已修改为中文 (zh_CN.UTF-8)"
+        echo -e "${YELLOW}请断开 SSH 并重新连接以查看效果。${NC}"
+    else
+        log_error "未找到 /etc/locale.gen，操作失败。"
+    fi
     press_any_key
 }
 
@@ -372,6 +489,7 @@ system_maintenance_menu() {
         echo "6.  🔓 开启 Root 登录 (修复 权限/SFTP)"
         echo "7.  🚀 优化系统参数 (提升并发性能)"
         echo "8.  🛠️ 安装常用工具 (Ping/Vim/Unzip...)"
+        echo "9.  🇨🇳 修改系统语言为中文"
         echo "0.  返回"
         read -r -p "请选择: " choice
         case $choice in
@@ -383,6 +501,7 @@ system_maintenance_menu() {
             6) enable_root ;;
             7) sys_optimize ;;
             8) install_essential_tools ;;
+            9) change_language_cn ;;
             0) return ;;
         esac
     done
@@ -436,21 +555,75 @@ EOF
     esac
 }
 
+check_ssh_keys() {
+    if [[ -f "$HOME/.ssh/authorized_keys" && -s "$HOME/.ssh/authorized_keys" ]]; then
+        return 0
+    fi
+    # Check common pub keys
+    for key in id_rsa.pub id_ed25519.pub id_ecdsa.pub; do
+        if [[ -f "$HOME/.ssh/$key" ]]; then return 0; fi
+    done
+    return 1
+}
+
 manage_ssh() {
-    print_title "SSH 管理"
+    print_title "SSH 安全管理"
     local port=$(grep "^Port" /etc/ssh/sshd_config | awk '{print $2}' | head -n1); [[ -z "$port" ]] && port=22
+    local permit_root=$(grep "^PermitRootLogin" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+    local pass_auth=$(grep "^PasswordAuthentication" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+    
     echo -e "当前端口: ${GREEN}$port${NC}"
-    echo "1. 改端口 2. 改密码 0. 返回"
+    echo -e "Root登录: ${GREEN}${permit_root:-默认}${NC}"
+    echo -e "密码认证: ${GREEN}${pass_auth:-默认}${NC}"
+    print_line
+    
+    echo "1. 修改 SSH 端口"
+    echo "2. 修改 Root 密码"
+    echo "3. 配置 Root 登录策略 (密码/密钥/禁止)"
+    echo "4. 开/关 密码认证 (禁止暴力破解)"
+    echo "0. 返回"
+    
     read -r -p "选: " c
     case $c in
         1)
             read -r -p "新端口 (1024-65535): " np
             [[ ! "$np" =~ ^[0-9]+$ ]] && return
+            # Backup
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%s)
+            
             if grep -q "^Port" /etc/ssh/sshd_config; then sed -i "s/^Port .*/Port $np/" /etc/ssh/sshd_config; else echo "Port $np" >> /etc/ssh/sshd_config; fi
+            
+            # Firewall config
             if command -v ufw &>/dev/null; then ufw allow "$np"/tcp; elif command -v firewall-cmd &>/dev/null; then firewall-cmd --permanent --add-port="$np"/tcp; firewall-cmd --reload; else iptables -I INPUT -p tcp --dport "$np" -j ACCEPT; fi
-            systemctl restart sshd; log_success "端口已改: $np"
+            
+            systemctl restart sshd
+            log_success "端口已修改为: $np (请使用新端口重连测试)"
             ;;
         2) log_info "输入新密码:"; passwd root; log_success "修改完成";;
+        3)
+            echo "1. 允许密码 (不推荐) 2. 仅允许密钥 (推荐) 3. 禁止 Root 登录"
+            read -r -p "选: " rc
+            case $rc in
+                1) sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config ;;
+                2) sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/g' /etc/ssh/sshd_config ;;
+                3) sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/g' /etc/ssh/sshd_config ;;
+            esac
+            systemctl restart sshd; log_success "策略已更新"
+            ;;
+        4)
+            if grep -q "PasswordAuthentication no" /etc/ssh/sshd_config; then
+                sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+                log_success "密码认证已【开启】"
+            else
+                if ! check_ssh_keys; then
+                    log_warn "未检测到 SSH 密钥！禁用密码认证将导致无法登录！"
+                    if ! confirm "确认要强制禁用吗？(后果自负)"; then return; fi
+                fi
+                sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/g' /etc/ssh/sshd_config
+                log_success "密码认证已【关闭】"
+            fi
+            systemctl restart sshd
+            ;;
         0) return ;;
     esac
     press_any_key
@@ -1008,9 +1181,9 @@ main_menu() {
             1) deploy_sb_menu ;;
             2) install_snell ;;
             3) 
-                echo "1. 系统环境 2. SSH管理 3. Fail2ban 4. 防火墙 0. 返回"
+                echo "1. 系统环境 2. SSH管理 3. Fail2ban 4. 防火墙 5. 运维/优化 0. 返回"
                 read -r -p "-> " s
-                case $s in 1) system_update;; 2) manage_ssh;; 3) install_fail2ban;; 4) manage_firewall;; esac
+                case $s in 1) system_update;; 2) manage_ssh;; 3) install_fail2ban;; 4) manage_firewall;; 5) system_maintenance_menu;; esac
                 ;;
             4) 
                 echo "1. BBR管理 2. 网络诊断 0. 返回"
