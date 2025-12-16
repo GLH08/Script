@@ -34,6 +34,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_success() { echo -e "${GREEN}[DONE]${NC} $1"; }
 
 print_title() { clear; echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"; echo -e "${CYAN}            $1${NC}"; echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"; }
+print_line() { echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"; }
 
 confirm_action() {
     echo; echo -e "${YELLOW}>> $1${NC}"
@@ -96,8 +97,10 @@ sys_update() {
 }
 
 sys_install_tools() {
-    log_info "安装基础工具 (curl, wget, vim, git, socat...)"
-    $INSTALL curl wget vim nano unzip zip tar git jq socat chrony iproute2 pass gnupg2
+    log_info "正在安装基础工具..."
+    echo "包含: curl, wget, vim, git, socat, rsyslog (系统日志), bsdmainutils (column工具) 等"
+    $INSTALL curl wget vim nano unzip zip tar git jq socat chrony iproute2 pass gnupg2 rsyslog bsdmainutils
+    systemctl enable --now rsyslog 2>/dev/null
     log_success "工具安装完成"
     read -r -p "按任意键返回..."
 }
@@ -110,17 +113,28 @@ sys_timezone() {
 }
 
 sys_swap() {
-    if [[ $(free -m | awk '/Swap/ {print $2}') -ne 0 ]]; then
-        log_warn "Swap 已存在，无需创建。"
-    else
-        local mem=$(free -m | awk '/Mem:/ {print $2}')
-        local size=2048; [[ $mem -gt 4096 ]] && size=4096
-        log_info "创建 ${size}MB Swap..."
-        dd if=/dev/zero of=/swapfile bs=1M count=$size status=none
-        chmod 600 /swapfile; mkswap /swapfile; swapon /swapfile
-        echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
-        log_success "Swap 创建完成"
+    local current_swap=$(free -m | awk '/Swap/ {print $2}')
+    if [[ "$current_swap" -ne 0 ]]; then
+        echo -e "当前 Swap: ${GREEN}${current_swap}MB${NC}"
+        if ! confirm_action "Swap 已存在，是否删除并重新创建？"; then return; fi
+        swapoff /swapfile 2>/dev/null
+        rm -f /swapfile
+        sed -i '/\/swapfile/d' /etc/fstab
+        echo "旧 Swap 已删除"
     fi
+
+    read -r -p "请输入 Swap 大小 (单位MB，建议 2048): " size
+    [[ -z "$size" ]] && size=2048
+    if [[ ! "$size" =~ ^[0-9]+$ ]]; then log_error "输入无效"; return; fi
+
+    log_info "正在创建 ${size}MB Swap..."
+    dd if=/dev/zero of=/swapfile bs=1M count=$size status=progress
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+    log_success "Swap 创建完成"
+    
     read -r -p "按任意键返回..."
 }
 
@@ -520,37 +534,58 @@ fail2ban_menu() {
         if systemctl is-active fail2ban &>/dev/null; then status="${GREEN}运行中${NC}"; else status="${RED}停止${NC}"; fi
         echo -e "状态: $status"
         echo
-        echo " 1. 安装/重置 Fail2ban (SSHD防爆破)"
+        echo " 1. 安装/重置 Fail2ban (Auto Fix)"
         echo " 2. 查看拦截记录 (Jailed IP)"
         echo " 3. 解封 IP (Unban)"
         echo " 4. 查看日志 (Last 50)"
-        echo " 5. 修改配置 (vi jail.local)"
+        echo " 5. 修改配置 (nano jail.local)"
         echo " 0. 返回"
         read -r -p "选: " c
         case $c in
             1) 
-                if confirm_action "安装配置 Fail2ban"; then
-                    $INSTALL fail2ban
+                if confirm_action "安装配置 Fail2ban (将自动修复日志依赖)"; then
+                    $INSTALL fail2ban rsyslog
+                    systemctl enable --now rsyslog
+                    
                     # Detect SSH Port
                     local ssh_port=$(grep "^Port" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
                     [[ -z "$ssh_port" ]] && ssh_port=22
+                    
+                    # Write Config
                     cat > /etc/fail2ban/jail.local <<EOF
 [sshd]
-enabled=true
-port=$ssh_port
-bantime=1h
-findtime=10m
-maxretry=5
+enabled = true
+port = $ssh_port
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 1h
+findtime = 10m
+ignoreip = 127.0.0.1/8
 EOF
+                    touch /var/log/auth.log
                     systemctl restart fail2ban && systemctl enable fail2ban
-                    log_success "已启动监控端口: $ssh_port"
+                    
+                    if systemctl is-active fail2ban &>/dev/null; then
+                        log_success "Fail2ban 启动成功 (SSH Port: $ssh_port)"
+                    else
+                        log_error "启动失败，请检查日志 (选项4)"
+                        # Attempt fallback for debian
+                        service rsyslog restart
+                        systemctl restart fail2ban
+                    fi
                 fi ;;
             2) fail2ban-client status sshd ;;
             3) 
                 read -r -p "输入要解封的IP: " ip
                 fail2ban-client set sshd unbanip "$ip" && log_success "已解封" ;;
-            4) journalctl -u fail2ban -n 50 --no-pager ;;
-            5) vim /etc/fail2ban/jail.local && systemctl restart fail2ban ;;
+            4) 
+                if [[ -f /var/log/fail2ban.log ]]; then
+                    tail -n 50 /var/log/fail2ban.log
+                else
+                    journalctl -u fail2ban -n 50 --no-pager
+                fi ;;
+            5) nano /etc/fail2ban/jail.local && systemctl restart fail2ban ;;
             0) return ;;
         esac
         read -r -p "按任意键继续..."
@@ -583,13 +618,106 @@ menu_nodes() {
     done
 }
 
+# ==================== BBR 管理 (Ref: bbr.sh) ====================
+
+sys_optimize_tweaks() {
+    print_title "系统参数调优"
+    log_info "正在优化系统限制 (Limits) 和内核参数 (Sysctl)..."
+    
+    # optimize limits.conf
+    if ! grep -q "soft nofile 65535" /etc/security/limits.conf; then
+        echo "* soft nofile 65535" >> /etc/security/limits.conf
+        echo "* hard nofile 65535" >> /etc/security/limits.conf
+    fi
+    if ! grep -q "pam_limits.so" /etc/pam.d/common-session 2>/dev/null; then
+         echo "session required pam_limits.so" >> /etc/pam.d/common-session 2>/dev/null
+    fi
+    
+    # optimize sysctl
+    cat > /etc/sysctl.d/99-optimize.conf <<EOF
+fs.file-max = 1000000
+net.core.rmem_max = 26214400
+net.core.wmem_max = 26214400
+net.core.rmem_default = 26214400
+net.core.wmem_default = 26214400
+net.core.somaxconn = 65535
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.ip_forward = 1
+EOF
+    sysctl --system
+    log_success "系统优化完成 (文件句柄/TCP参数)"
+    echo "建议重启以完全生效"
+    read -r -p "按任意键返回..."
+}
+
+check_bbr_status() {
+    local bbr_ver=$(modinfo tcp_bbr 2>/dev/null | grep "^version" | awk '{print $2}')
+    local algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    local qdisc=$(sysctl net.core.default_qdisc | awk '{print $3}')
+    
+    echo -e "内核模块版本: ${GREEN}${bbr_ver:-未知}${NC}"
+    echo -e "当前拥塞控制: ${GREEN}${algo:-未知}${NC}"
+    echo -e "当前队列管理: ${GREEN}${qdisc:-未知}${NC}"
+}
+
+install_bbr_kernel() {
+    log_info "准备安装/更新 BBRv3 内核..."
+    # A simplified version of bbr.sh kernel install logic could go here
+    # For now, to keep it stable, we can pull the full script or use a simple heuristic
+    # Let's use the one-liner recommended by the bbr.sh author or similar
+    bash <(curl -L -s https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh)
+}
+
+menu_bbr() {
+    while true; do
+        print_title "BBR 加速管理"
+        check_bbr_status
+        print_line
+        echo " 1. 安装/切换 BBR 内核 (调用外部脚本)"
+        echo " 2. 启用 BBR + FQ (推荐)"
+        echo " 3. 启用 BBR + CAKE"
+        echo " 4. 启用 BBR + FQ_PIE"
+        echo " 5. 系统调优 (Limits/Sysctl)"
+        echo " 0. 返回"
+        read -r -p "选: " c
+        case $c in
+            1) install_bbr_kernel ;;
+            2) 
+                if confirm_action "启用 BBR+FQ"; then
+                   echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-bbr.conf
+                   echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
+                   sysctl --system
+                   log_success "已应用 BBR+FQ"
+                fi ;;
+            3) 
+                if confirm_action "启用 BBR+CAKE"; then
+                   echo "net.core.default_qdisc=cake" > /etc/sysctl.d/99-bbr.conf
+                   echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
+                   sysctl --system
+                   log_success "已应用 BBR+CAKE"
+                fi ;;
+            4) 
+                if confirm_action "启用 BBR+FQ_PIE"; then
+                   echo "net.core.default_qdisc=fq_pie" > /etc/sysctl.d/99-bbr.conf
+                   echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
+                   sysctl --system
+                   log_success "已应用 BBR+FQ_PIE"
+                fi ;;
+            5) sys_optimize_tweaks ;; # We need to define this or remove
+            0) return ;;
+        esac
+        read -r -p "按任意键继续..."
+    done
+}
+
 menu_tools() {
     while true; do
         print_title "高级工具"
         echo " 1. 配置 GHCR/Docker 凭据助手"
         echo " 2. Fail2ban 安全管理 (防爆破)"
         echo " 3. 查看端口占用"
-        echo " 4. 开启 BBR"
+        echo " 4. BBR 加速管理"
         echo " 0. 返回"
         read -r -p "选: " c
         case $c in
@@ -597,15 +725,14 @@ menu_tools() {
             2) fail2ban_menu ;;
             3) 
                 print_title "端口占用情况 (TCP/UDP)"
-                ss -tulpn | grep LISTEN | awk '{print $1, $5, $7}' | column -t
+                if command -v column &>/dev/null; then
+                    ss -tulpn | grep LISTEN | awk '{print $1, $5, $7}' | column -t
+                else
+                    ss -tulpn | grep LISTEN
+                fi
                 echo
                 read -r -p "按任意键返回..." ;;
-            4) 
-                if confirm_action "开启 BBR 加速"; then
-                    echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-bbr.conf
-                    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
-                    sysctl --system; log_success "BBR 已开启"
-                fi ;;
+            4) menu_bbr ;;
             0) return ;;
         esac
     done
@@ -636,7 +763,7 @@ main_menu() {
         echo " 1. 🟢 系统初始化 (Init)"
         echo " 2. 🚀 节点部署 (Deploy)"
         echo " 3. 🔧 高级工具 (Tools)"
-        echo " 4. � 脚本管理 (Update/Uninstall)"
+        echo " 4. 📜 脚本管理 (Update/Uninstall)"
         echo " 0. 退出"
         echo
         read -r -p "请选择: " c
