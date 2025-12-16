@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-SCRIPT_VERSION="6.0.2"
+SCRIPT_VERSION="6.2.0"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/GLH08/Script/main/vps.sh"
 INSTALL_PATH="/usr/local/bin/vps"
 SB_CONFIG="/etc/sing-box/config.json"
