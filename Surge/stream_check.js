@@ -1,16 +1,17 @@
 /***
  * Surge 流媒体 & AI 服务检测脚本
- * V5.0 地区误判修复版
+ * V5.1 YouTube 修复版
  * 
  * 核心修复：
- * 1. 修正 Netflix/YouTube 默认显示 US 的 Bug
- * 2. 引入智能 IP 锚定：当无法从 URL 提取地区时，自动匹配节点出口 IP 地区
- * 3. 增强 YouTube 正则匹配规则
+ * 1. YouTube: 检测链接从 /premium 改为 首页 (www.youtube.com)
+ *    解决 /premium 页面包含硬编码 "US" 导致英国/欧洲节点误判为美国的问题。
+ * 2. 保持 V5 的智能 IP 锚定和双重验证逻辑。
  */
 
 // ========== 配置区域 ==========
 const BASE_URL_NF = 'https://www.netflix.com/title/';
-const BASE_URL_YTB = "https://www.youtube.com/premium";
+// ⚠️ 变动：改为首页，准确度更高
+const BASE_URL_YTB = "https://www.youtube.com/";
 const BASE_URL_DISNEY = 'https://www.disneyplus.com';
 const BASE_URL_GPT = 'https://chat.openai.com/';
 const BASE_URL_GPT_TRACE = 'https://chat.openai.com/cdn-cgi/trace';
@@ -21,9 +22,7 @@ const BASE_URL_COPILOT = 'https://copilot.microsoft.com/';
 const BASE_URL_META = 'https://www.meta.ai/';
 const BASE_URL_IP_API = 'https://api.ip.sb/geoip';
 
-// ID 1: 非自制剧 (用于检测完整解锁)
 const FILM_ID = 81280792;
-// ID 2: 自制剧 (用于检测是否彻底封锁)
 const ORIGINAL_ID = 80018499; 
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -73,7 +72,7 @@ async function checkIP() {
   if (status === 200 && data) {
     try {
       const info = JSON.parse(data);
-      result.loc = info.country_code || "Unknown"; // 修正：默认值不设为 US
+      result.loc = info.country_code || "Unknown";
       let org = info.organization || "";
       if (org.length > 20) org = org.substring(0, 20) + "...";
       result.ip = `${info.ip} ${getRegionStr(result.loc)} (${org})`;
@@ -87,60 +86,55 @@ async function checkIP() {
   }
 }
 
+// 🔥 YouTube 逻辑修复
 async function checkYouTube() {
   const { status, data } = await makeRequest(BASE_URL_YTB);
   if (status !== 200) { result.ytb = "检测失败 🚫"; return; }
   
-  if (data && data.includes('Premium is not available')) {
+  // 首页如果包含这个关键词，通常是 Region 限制
+  if (data && data.includes('www.google.cn')) {
     result.ytb = "未支持 🚫";
-  } else {
-    let region = '';
-    if (data) {
-        // 增强正则：尝试匹配 GL 和 countryCode
-        let match = /"GL":"([A-Z]{2})"/.exec(data);
-        if (match) {
-            region = match[1];
-        } else {
-            let match2 = /"countryCode":"([A-Z]{2})"/.exec(data);
-            if (match2) region = match2[1];
-            else if (data.includes('www.google.cn')) region = 'CN';
-        }
-    }
-    
-    // 关键修复：如果正则没提取到，使用 IP 地区兜底，而不是默认 US
-    if (!region || region === '') region = result.loc;
-    
-    result.ytb = `已解锁 ➟ ${getRegionStr(region)}`;
+    return;
   }
+
+  let region = '';
+  if (data) {
+      // 核心改动：匹配 ytcfg.set 中的 GL，这是最准确的
+      // 格式通常为: "GL":"GB"
+      let match = /['"]GL['"]\s*:\s*['"]([A-Z]{2})['"]/.exec(data);
+      if (match) {
+          region = match[1];
+      } else {
+          // 备用正则
+          let match2 = /"countryCode":"([A-Z]{2})"/.exec(data);
+          if (match2) region = match2[1];
+      }
+  }
+  
+  // 依然保留 IP 兜底，防止正则完全失效
+  if (!region || region === '') region = result.loc;
+  
+  result.ytb = `已解锁 ➟ ${getRegionStr(region)}`;
 }
 
-// 🔥 Netflix 逻辑修复
 async function checkNetflix() {
   const { status, headers } = await makeRequest(BASE_URL_NF + FILM_ID);
   
   if (status === 200) {
-    let region = ''; // 默认为空
+    let region = '';
     try {
       let url = headers['X-Originating-URL'] || headers['x-originating-url'];
       if (url) {
         let parts = url.split('/');
-        // 只有当 URL 包含特定地区前缀时 (如 /jp/title/) 才提取
-        // 如果是 /title/，说明没有重定向，直接使用 IP 地区
         let possibleRegion = parts[3].split('-')[0];
-        if (possibleRegion !== 'title') {
-            region = possibleRegion;
-        }
+        if (possibleRegion !== 'title') region = possibleRegion;
       }
     } catch (e) {}
-    
-    // 关键修复：如果 URL 没体现地区，则认为是解锁了当前 IP 所在的地区库
     if (!region) region = result.loc;
-    
     result.nf = `完整解锁 ➟ ${getRegionStr(region)}`;
   } else if (status === 403) {
     result.nf = "未支持 🚫";
   } else if (status === 404) {
-    // 双重验证
     const { status: status2 } = await makeRequest(BASE_URL_NF + ORIGINAL_ID);
     if (status2 === 200) {
       result.nf = `仅自制剧 ➟ ${getRegionStr(result.loc)}`;
@@ -199,9 +193,7 @@ async function checkMeta() {
 
 // Main
 ;(async () => {
-  // 必须等待 IP 检测完成，因为它是所有地区判断的兜底
   await checkIP(); 
-  
   await Promise.allSettled([
     checkYouTube(), checkNetflix(), checkDisney(), checkTikTok(),
     checkChatGPT(), checkSimple(BASE_URL_CLAUDE, 'claude'),
