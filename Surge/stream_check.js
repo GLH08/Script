@@ -1,12 +1,11 @@
 /***
  * Surge 流媒体 & AI 服务检测脚本
- * V4.1 双重验证精准版
+ * V5.0 地区误判修复版
  * 
- * 更新日志：
- * 1. Netflix 升级为双重验证：
- *    - 先测非自制剧 -> 404? -> 再测自制剧
- *    - 确保“仅自制剧”判断 100% 准确，排除假 404
- * 2. 保持 V4.0 的整齐排版
+ * 核心修复：
+ * 1. 修正 Netflix/YouTube 默认显示 US 的 Bug
+ * 2. 引入智能 IP 锚定：当无法从 URL 提取地区时，自动匹配节点出口 IP 地区
+ * 3. 增强 YouTube 正则匹配规则
  */
 
 // ========== 配置区域 ==========
@@ -39,7 +38,7 @@ let result = {
 // ========== 工具函数 ==========
 
 function getRegionStr(code) {
-  if (!code || code === 'null' || code === 'undefined') return "未知";
+  if (!code || code === 'null' || code === 'undefined' || code === '') return "未知";
   code = code.toUpperCase();
   if (code === 'GLOBAL') return "Global";
   let flag = "🏳️";
@@ -74,57 +73,78 @@ async function checkIP() {
   if (status === 200 && data) {
     try {
       const info = JSON.parse(data);
-      result.loc = info.country_code || "US";
+      result.loc = info.country_code || "Unknown"; // 修正：默认值不设为 US
       let org = info.organization || "";
       if (org.length > 20) org = org.substring(0, 20) + "...";
       result.ip = `${info.ip} ${getRegionStr(result.loc)} (${org})`;
-    } catch (e) { result.ip = "IP 解析失败"; }
-  } else { result.ip = "IP 获取失败"; }
+    } catch (e) { 
+      result.ip = "IP 解析失败"; 
+      result.loc = "Unknown";
+    }
+  } else { 
+    result.ip = "IP 获取失败"; 
+    result.loc = "Unknown";
+  }
 }
 
 async function checkYouTube() {
   const { status, data } = await makeRequest(BASE_URL_YTB);
   if (status !== 200) { result.ytb = "检测失败 🚫"; return; }
+  
   if (data && data.includes('Premium is not available')) {
     result.ytb = "未支持 🚫";
   } else {
     let region = '';
     if (data) {
+        // 增强正则：尝试匹配 GL 和 countryCode
         let match = /"GL":"([A-Z]{2})"/.exec(data);
-        if (match) region = match[1];
-        else if (data.includes('www.google.cn')) region = 'CN';
+        if (match) {
+            region = match[1];
+        } else {
+            let match2 = /"countryCode":"([A-Z]{2})"/.exec(data);
+            if (match2) region = match2[1];
+            else if (data.includes('www.google.cn')) region = 'CN';
+        }
     }
-    if (!region) region = result.loc;
+    
+    // 关键修复：如果正则没提取到，使用 IP 地区兜底，而不是默认 US
+    if (!region || region === '') region = result.loc;
+    
     result.ytb = `已解锁 ➟ ${getRegionStr(region)}`;
   }
 }
 
-// 🔥 Netflix 双重验证逻辑
+// 🔥 Netflix 逻辑修复
 async function checkNetflix() {
-  // 第一次检测：非自制剧
   const { status, headers } = await makeRequest(BASE_URL_NF + FILM_ID);
   
   if (status === 200) {
-    let region = 'US';
+    let region = ''; // 默认为空
     try {
       let url = headers['X-Originating-URL'] || headers['x-originating-url'];
-      if (url) region = url.split('/')[3].split('-')[0].replace('title', 'us');
+      if (url) {
+        let parts = url.split('/');
+        // 只有当 URL 包含特定地区前缀时 (如 /jp/title/) 才提取
+        // 如果是 /title/，说明没有重定向，直接使用 IP 地区
+        let possibleRegion = parts[3].split('-')[0];
+        if (possibleRegion !== 'title') {
+            region = possibleRegion;
+        }
+      }
     } catch (e) {}
+    
+    // 关键修复：如果 URL 没体现地区，则认为是解锁了当前 IP 所在的地区库
+    if (!region) region = result.loc;
+    
     result.nf = `完整解锁 ➟ ${getRegionStr(region)}`;
   } else if (status === 403) {
     result.nf = "未支持 🚫";
   } else if (status === 404) {
-    // ⚠️ 关键：第一次 404，进行第二次检测（自制剧）
-    const { status: status2, headers: headers2 } = await makeRequest(BASE_URL_NF + ORIGINAL_ID);
+    // 双重验证
+    const { status: status2 } = await makeRequest(BASE_URL_NF + ORIGINAL_ID);
     if (status2 === 200) {
-      let region = 'US';
-      try {
-        let url = headers2['X-Originating-URL'] || headers2['x-originating-url'];
-        if (url) region = url.split('/')[3].split('-')[0].replace('title', 'us');
-      } catch (e) {}
-      result.nf = `仅自制剧 ➟ ${getRegionStr(region)}`;
+      result.nf = `仅自制剧 ➟ ${getRegionStr(result.loc)}`;
     } else {
-      // 自制剧也看不了，那就是真挂了
       result.nf = "未支持 🚫";
     }
   } else {
@@ -165,7 +185,6 @@ async function checkChatGPT() {
 
 async function checkSimple(url, key) {
   const { status } = await makeRequest(url);
-  // Claude 403是限制; Gemini 302/200是支持; Copilot 200是支持
   if (key === 'claude') result[key] = (status !== 403) ? "已支持 🎉" : "未支持 🚫";
   else if (key === 'gemini') result[key] = (status === 200 || status === 302) ? "已支持 🎉" : "未支持 🚫";
   else if (key === 'copilot') result[key] = (status === 200) ? "已支持 🎉" : "未支持 🚫";
@@ -180,7 +199,9 @@ async function checkMeta() {
 
 // Main
 ;(async () => {
-  await checkIP();
+  // 必须等待 IP 检测完成，因为它是所有地区判断的兜底
+  await checkIP(); 
+  
   await Promise.allSettled([
     checkYouTube(), checkNetflix(), checkDisney(), checkTikTok(),
     checkChatGPT(), checkSimple(BASE_URL_CLAUDE, 'claude'),
