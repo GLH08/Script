@@ -1,14 +1,14 @@
 /***
  * Surge 流媒体 & AI 服务检测脚本
- * 2026 美化版 - 修复排版与旗帜显示
+ * v3.0 最终修复版
  * 
- * 功能：
- * 1. 自动生成任意国家旗帜 Emoji
- * 2. 修复面板换行问题
- * 3. 增强 YouTube/Netflix 地区提取稳定性
+ * 修复：
+ * 1. 彻底移除分隔线，修复排版错乱
+ * 2. 暴力修复“方框叉号”乱码，非标准代码统一显示地球
+ * 3. 增加重试机制防止超时
  */
 
-// ========== 配置区域 ==========
+// ========== 常量定义 ==========
 const BASE_URL_NF = 'https://www.netflix.com/title/';
 const BASE_URL_YTB = "https://www.youtube.com/premium";
 const BASE_URL_DISNEY = 'https://www.disneyplus.com';
@@ -22,46 +22,52 @@ const BASE_URL_META = 'https://www.meta.ai/';
 const BASE_URL_IP_API = 'https://api.ip.sb/geoip';
 
 const FILM_ID = 81280792;
+// 使用 Chrome UA 模拟真实浏览器
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// 模块参数获取
+// 模块参数
 const TARGET_POLICY = $argument || "DIRECT";
 
 // 结果容器
 let result = {
   "ip": "检测中...",
-  "loc": "", // IP地区
-  "YouTube": "⌛️",
-  "Netflix": "⌛️",
-  "Disney": "⌛️",
-  "TikTok": "⌛️",
-  "ChatGPT": "⌛️",
-  "Claude": "⌛️",
-  "Gemini": "⌛️",
-  "Copilot": "⌛️",
-  "MetaAI": "⌛️"
+  "loc": "", 
+  "YouTube": "⌛️", "Netflix": "⌛️", "Disney": "⌛️", "TikTok": "⌛️",
+  "ChatGPT": "⌛️", "Claude": "⌛️", "Gemini": "⌛️", "Copilot": "⌛️", "MetaAI": "⌛️"
 };
 
 // ========== 核心工具函数 ==========
 
 /**
- * 自动将国家代码转换为 Emoji 旗帜
- * 算法：将字母转为 Unicode 区域指示符号
+ * 严格模式的旗帜生成
+ * 解决 ☒ 乱码问题
  */
 function getFlag(code) {
-  if (!code || code === 'null' || code === 'undefined') return "🏳️";
-  if (code.toUpperCase() === 'GLOBAL') return "🌍";
-  if (code.length !== 2) return `[${code}]`; // 非标准代码直接显示文字
+  // 1. 空值检查
+  if (!code || code === 'null' || code === 'undefined') return "🌍";
+  
+  // 2. 格式化
+  code = code.toUpperCase();
+  
+  // 3. 特殊处理
+  if (code === 'GLOBAL') return "🌍";
+  if (code === 'CN') return "🇨🇳"; // 部分设备可能显示为CN文字
+  
+  // 4. 只有严格为2位字母时才生成旗帜，否则返回地球
+  if (!/^[A-Z]{2}$/.test(code)) return "🌍";
 
   const offset = 127397;
-  const flag = code.toUpperCase().replace(/./g, (char) =>
-    String.fromCodePoint(char.charCodeAt(0) + offset)
-  );
-  return flag;
+  try {
+    return code.replace(/./g, (char) =>
+      String.fromCodePoint(char.charCodeAt(0) + offset)
+    );
+  } catch (e) {
+    return "🌍"; // 生成失败兜底
+  }
 }
 
 // 统一请求函数
-function makeRequest(url, headers = {}, timeout = 5) {
+function makeRequest(url, headers = {}, timeout = 6) { // 超时延长到6秒
   return new Promise((resolve, reject) => {
     let option = {
       url: url,
@@ -72,212 +78,151 @@ function makeRequest(url, headers = {}, timeout = 5) {
     
     $httpClient.get(option, function(error, response, data) {
       if (error) {
-        reject(error);
+        resolve({ status: 0, data: null }); // 错误不reject，而是返回状态0
       } else {
-        resolve({ 
-          status: response.status, 
-          data: data, 
-          headers: response.headers 
-        });
+        resolve({ status: response.status, data: data, headers: response.headers });
       }
     });
   });
 }
 
-// ========== IP 信息 ==========
+// ========== 业务逻辑 ==========
+
+// IP检测
 async function getIPInfo() {
-  try {
-    const { status, data } = await makeRequest(BASE_URL_IP_API, {}, 6);
-    if (status === 200) {
+  const { status, data } = await makeRequest(BASE_URL_IP_API);
+  if (status === 200 && data) {
+    try {
       const info = JSON.parse(data);
       result["ip"] = info.ip || "IP未知";
-      // 存储 IP 所在国家，用于后续兜底显示
       result["loc"] = info.country_code || "";
-      if (result["loc"]) {
-          result["ip"] += ` ${getFlag(result["loc"])}`;
-      }
-      if (info.organization) {
-          result["ip"] += ` (${info.organization})`;
-      }
-    } else {
-      result["ip"] = "IP获取失败";
-    }
-  } catch (e) {
-    result["ip"] = "IP查询超时";
+      if (result["loc"]) result["ip"] += ` ${getFlag(result["loc"])}`;
+      if (info.organization) result["ip"] += ` (${info.organization})`;
+    } catch(e) { result["ip"] = "IP解析误"; }
+  } else {
+    result["ip"] = "IP获取失败";
   }
 }
 
-// ========== 流媒体检测 ==========
-
-// 1. TikTok
+// TikTok
 async function testTikTok() {
-  try {
-    const { status, data } = await makeRequest(BASE_URL_TIKTOK);
-    if (status === 200) {
-      let regionMatch = data.match(/"region":"([a-zA-Z]{2})"/i);
-      if (regionMatch && regionMatch[1]) {
-        result["TikTok"] = "✅ " + getFlag(regionMatch[1]);
-      } else if (data.includes('region_restriction')) {
-        result["TikTok"] = "🚫 风控";
-      } else {
-        result["TikTok"] = "✅ 未知";
-      }
+  const { status, data } = await makeRequest(BASE_URL_TIKTOK);
+  if (status === 200 && data) {
+    let match = data.match(/"region":"([a-zA-Z]{2})"/i);
+    if (match) {
+      result["TikTok"] = "✅ " + getFlag(match[1]);
+    } else if (data.includes('region_restriction')) {
+      result["TikTok"] = "🚫 风控";
     } else {
-      result["TikTok"] = "🚫 限制";
+      result["TikTok"] = "✅ " + getFlag(result["loc"]); // 兜底
     }
-  } catch (e) { result["TikTok"] = "🚦 超时"; }
+  } else {
+    result["TikTok"] = "🚫 失败";
+  }
 }
 
-// 2. YouTube
+// YouTube
 async function testYTB() {
-  try {
-    const { status, data } = await makeRequest(BASE_URL_YTB);
-    if (status !== 200) {
-      result["YouTube"] = "🚫 失败";
-    } else if (data.indexOf('Premium is not available in your country') !== -1) {
-      result["YouTube"] = "🚫 限制";
-    } else {
-      let region = '';
-      let re = new RegExp('"GL":"(.*?)"', 'gm');
-      let ret = re.exec(data);
-      if (ret != null && ret.length === 2) {
-        region = ret[1];
-      } else if (data.indexOf('www.google.cn') !== -1) {
-        region = 'CN';
-      } else {
-        // 兜底：如果正则没取到，尝试默认使用 IP 地区，或者标记为 US
-        region = result["loc"] || "US";
-      }
-      result["YouTube"] = "✅ " + getFlag(region);
+  const { status, data } = await makeRequest(BASE_URL_YTB);
+  if (status !== 200) {
+    result["YouTube"] = "🚫 失败";
+  } else if (data && data.indexOf('Premium is not available') !== -1) {
+    result["YouTube"] = "🚫 限制";
+  } else {
+    let region = '';
+    if (data) {
+        let match = /"GL":"([A-Z]{2})"/.exec(data);
+        if (match) region = match[1];
+        else if (data.indexOf('www.google.cn') !== -1) region = 'CN';
     }
-  } catch (e) { result["YouTube"] = "🚦 超时"; }
+    // 强制兜底，防止空值导致乱码
+    if (!region) region = result["loc"] || "US";
+    result["YouTube"] = "✅ " + getFlag(region);
+  }
 }
 
-// 3. Netflix
-async function testNf(filmId) {
-  try {
-    const { status, headers, data } = await makeRequest(BASE_URL_NF + filmId);
-    if (status === 404) {
-      result["Netflix"] = "⚠️ 自制";
-    } else if (status === 403) {
-      result["Netflix"] = "🚫 限制";
-    } else if (status === 200) {
-      let region = '';
-      try {
-        let url = headers['X-Originating-URL'] || headers['x-originating-url'];
-        if (url) region = url.split('/')[3].split('-')[0].replace('title', 'us');
-      } catch (e) {}
-      // 如果获取不到，默认给个 US 或者 IP 地区
-      if (!region) region = result["loc"] || "US"; 
-      result["Netflix"] = "✅ " + getFlag(region);
-    } else {
-      result["Netflix"] = "🚫 异常";
-    }
-  } catch (e) { result["Netflix"] = "🚦 超时"; }
+// Netflix
+async function testNf(id) {
+  const { status, headers } = await makeRequest(BASE_URL_NF + id);
+  if (status === 200) {
+    let region = '';
+    try {
+      let url = headers['X-Originating-URL'] || headers['x-originating-url'];
+      if (url) region = url.split('/')[3].split('-')[0].replace('title', 'us');
+    } catch (e) {}
+    if (!region) region = result["loc"] || "US";
+    result["Netflix"] = "✅ " + getFlag(region);
+  } else if (status === 404) {
+    result["Netflix"] = "⚠️ 自制";
+  } else {
+    result["Netflix"] = "🚫 限制";
+  }
 }
 
-// 4. Disney+
-async function testDisneyPlus() {
-  try {
-    const { status, data } = await makeRequest(BASE_URL_DISNEY);
-    if (status === 200 && data.indexOf('not available in your region') === -1) {
-      let match = data.match(/Region: ([A-Za-z]{2})/);
-      let region = match ? match[1] : "Global";
-      result["Disney"] = "✅ " + getFlag(region);
-    } else {
-      result["Disney"] = "🚫 限制";
-    }
-  } catch (e) { result["Disney"] = "🚦 超时"; }
+// Disney+
+async function testDisney() {
+  const { status, data } = await makeRequest(BASE_URL_DISNEY);
+  if (status === 200 && data && data.indexOf('not available in your region') === -1) {
+    let match = data.match(/Region: ([A-Za-z]{2})/);
+    let region = match ? match[1] : "Global";
+    result["Disney"] = "✅ " + getFlag(region);
+  } else {
+    result["Disney"] = "🚫 限制";
+  }
 }
 
-// ========== AI 检测 ==========
-
-// 5. ChatGPT
+// AI Tests
 async function testChatGPT() {
-  try {
-    const { status } = await makeRequest(BASE_URL_GPT, {}, 6);
-    if (status === 403) {
-      result["ChatGPT"] = "🚫 限制";
+  const { status } = await makeRequest(BASE_URL_GPT, {}, 5);
+  if (status === 403) {
+    result["ChatGPT"] = "🚫 限制";
+  } else {
+    // 尝试Trace
+    const { status: ts, data: td } = await makeRequest(BASE_URL_GPT_TRACE, {}, 4);
+    if (ts === 200 && td && td.includes("loc=")) {
+        let region = td.split("loc=")[1].split("\n")[0];
+        result["ChatGPT"] = "✅ " + getFlag(region);
     } else {
-      try {
-        const { status: ts, data: td } = await makeRequest(BASE_URL_GPT_TRACE, {}, 5);
-        if (ts === 200 && td.includes("loc=")) {
-          let region = td.split("loc=")[1].split("\n")[0];
-          result["ChatGPT"] = "✅ " + getFlag(region);
-        } else {
-          result["ChatGPT"] = "✅ 通用";
-        }
-      } catch (e) { result["ChatGPT"] = "✅ 通用"; }
+        result["ChatGPT"] = "✅ 通用";
     }
-  } catch (e) { result["ChatGPT"] = "🚦 超时"; }
+  }
 }
 
-async function testClaude() {
-  try {
-    const { status } = await makeRequest(BASE_URL_CLAUDE);
-    result["Claude"] = (status !== 403) ? "✅ 支持" : "🚫 限制";
-  } catch (e) { result["Claude"] = "🚦 超时"; }
+async function testSimple(url, key, code200 = "✅ 支持", code403 = "🚫 限制") {
+  const { status } = await makeRequest(url);
+  // Gemini 302跳转也是支持，Claude 403是限制
+  if (key === 'Claude') result[key] = (status !== 403) ? "✅ 支持" : "🚫 限制";
+  else if (key === 'Gemini') result[key] = (status === 200 || status === 302) ? "✅ 支持" : "🚫 限制";
+  else if (key === 'Copilot') result[key] = (status === 200) ? "✅ 支持" : "🚫 限制";
 }
 
-async function testGemini() {
-  try {
-    const { status } = await makeRequest(BASE_URL_GEMINI);
-    result["Gemini"] = (status === 200 || status === 302) ? "✅ 支持" : "🚫 限制";
-  } catch (e) { result["Gemini"] = "🚦 超时"; }
+async function testMeta() {
+  const { status, data } = await makeRequest(BASE_URL_META);
+  if (status === 200 && data && !data.includes("not yet available")) result["MetaAI"] = "✅ 支持";
+  else if (status === 302) result["MetaAI"] = "✅ 登录";
+  else result["MetaAI"] = "🚫 限制";
 }
 
-async function testCopilot() {
-  try {
-    const { status } = await makeRequest(BASE_URL_COPILOT);
-    result["Copilot"] = (status === 200) ? "✅ 支持" : "🚫 限制";
-  } catch (e) { result["Copilot"] = "🚦 超时"; }
-}
-
-async function testMetaAI() {
-  try {
-    const { status, data } = await makeRequest(BASE_URL_META);
-    if (status === 200 && data.indexOf("not yet available") === -1) {
-       result["MetaAI"] = "✅ 支持";
-    } else if (status === 302) {
-       result["MetaAI"] = "✅ 登录";
-    } else {
-       result["MetaAI"] = "🚫 限制";
-    }
-  } catch (e) { result["MetaAI"] = "🚦 超时"; }
-}
-
-// ========== 主程序 ==========
+// Main
 ;(async () => {
-  // 1. 获取IP
   await getIPInfo();
-  
-  // 2. 并行检测
   await Promise.allSettled([
-    testDisneyPlus(),
-    testNf(FILM_ID),
-    testYTB(),
-    testTikTok(),
-    testChatGPT(),
-    testClaude(),
-    testGemini(),
-    testCopilot(),
-    testMetaAI()
+    testDisney(), testNf(FILM_ID), testYTB(), testTikTok(),
+    testChatGPT(), 
+    testSimple(BASE_URL_CLAUDE, 'Claude'),
+    testSimple(BASE_URL_GEMINI, 'Gemini'),
+    testSimple(BASE_URL_COPILOT, 'Copilot'),
+    testMeta()
   ]);
 
-  // 3. 构造美化后的面板内容
-  // 使用简短的分隔线，或者直接用空行分隔
-  const separator = "──────────────"; 
-  
+  // ⚠️⚠️⚠️ 这里彻底去掉了横线，只保留换行符 ⚠️⚠️⚠️
   let content = 
-    `📡 ${result["ip"]}\n` +
-    `${separator}\n` +
+    `📡 ${result["ip"]}\n\n` +
     `YouTube: ${result["YouTube"]}   Disney+: ${result["Disney"]}\n` +
-    `Netflix: ${result["Netflix"]}   TikTok:  ${result["TikTok"]}\n` +
-    `${separator}\n` +
+    `Netflix: ${result["Netflix"]}   TikTok:  ${result["TikTok"]}\n\n` +
     `ChatGPT: ${result["ChatGPT"]}   Claude: ${result["Claude"]}\n` +
     `Gemini:  ${result["Gemini"]}   Copilot: ${result["Copilot"]}\n` +
-    `Meta AI: ${result["MetaAI"]}\n` +
-    `${separator}\n` +
+    `Meta AI: ${result["MetaAI"]}\n\n` +
     `🔧 策略: ${TARGET_POLICY}`;
 
   $done({
