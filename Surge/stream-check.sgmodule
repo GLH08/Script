@@ -1,0 +1,13 @@
+#!name=流媒体 & AI 解锁检测
+#!desc=支持自定义节点进行流媒体和AI服务解锁检测，显示出口IP
+#!system=ios
+#!category=Panel
+
+#!arguments=测试策略:DIRECT,更新间隔:3600
+#!arguments-desc=测试策略: 填写要测试的策略组或节点名称（如"🇺🇸 US Node"、"🎬 Netflix专线"等）\n更新间隔: 面板自动刷新间隔，单位秒
+
+[Panel]
+StreamCheck = script-name=StreamCheck, title="流媒体 & AI 检测", content="请刷新面板", update-interval={{{更新间隔}}}
+
+[Script]
+StreamCheck = type=generic, timeout=30, script-path=https://raw.githubusercontent.com/GLH08/Script/refs/heads/main/Surge/stream-check.js, argument={{{测试策略}}}
