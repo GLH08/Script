@@ -1,0 +1,21 @@
+#!name=CamScanner 解锁高级版
+#!desc=解锁CamScanner（扫描全能王）部分高级特权，设置VIP过期时间至2033年
+#!author=NobyDa
+#!icon=https://apps.apple.com/cn/app/id388627783
+#!homepage=https://github.com/GLH08/Script
+#!system=iOS,iPadOS,tvOS,macOS
+#!tag=工具,效率
+
+[General]
+
+[rule]
+
+[rewrite]
+
+[host]
+
+[script]
+http-response ^https?://(api|api-cs)\.intsig\.net/purchase/cs/query_properties? script-path = https://raw.githubusercontent.com/GLH08/Script/refs/heads/main/Loon/CamScanner.js, requires-body = true, tag = CamScanner解锁
+
+[mitm]
+hostname = %APPEND% ap*.intsig.net
